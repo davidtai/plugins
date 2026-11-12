@@ -291,6 +291,9 @@ fn openBank(ctx: *const abi.LoadCtx, geo: *const abi.BankGeometry, budget: abi.B
         .phase = &Bank.phase,
         .read_ahead = &Bank.readAhead,
         .meters = &Bank.meters,
+        // A decode call's pairs each take moeLing's top-1 bytes at weight 1, combined row by row: a row's bytes are its
+        // own call's (the host's exact verify calls one decode lane at a time).
+        .exact_rows = true,
     };
     return .ok;
 }
