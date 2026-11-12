@@ -1,7 +1,7 @@
 //! Builds this plugin with the mlx-serve plugin kit: turboexl3 (build.zig.zon, pinned by URL and hash) over this
 //! plugin's `sdk` for it (src/turboexl3_sdk.zig), and the kit's expert stream read pool (C, `streamSources`) compiled into
 //! the plugin. `zig build test` runs the MLX-free tests: config.zig (the kit's step), src/clamps.zig, src/bank_rows.zig,
-//! src/ling_switches.zig and src/ling_manifest.zig.
+//! src/ling_switches.zig, src/ling_manifest.zig and src/stream_stats.zig.
 
 const std = @import("std");
 
@@ -42,7 +42,7 @@ pub fn build(b: *std.Build) void {
 
     // The MLX-free tests, each a root of its own.
     const test_step = b.top_level_steps.get("test").?;
-    for ([_][]const u8{ "clamps", "bank_rows", "ling_switches", "ling_manifest" }) |name| {
+    for ([_][]const u8{ "clamps", "bank_rows", "ling_switches", "ling_manifest", "stream_stats" }) |name| {
         const m = b.createModule(.{ .root_source_file = b.path(b.fmt("src/{s}.zig", .{name})), .target = target, .optimize = optimize });
         test_step.step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = name, .root_module = m })).step);
     }

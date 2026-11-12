@@ -13,6 +13,7 @@
 //! and grow), the prompt rows again at the next prompt (its shrink, the residents kept).
 
 const std = @import("std");
+const stream_stats = @import("stream_stats.zig");
 const kit = @import("mlx_serve");
 const mlx = kit.mlx;
 const expert = kit.streamed.expert;
@@ -181,6 +182,10 @@ pub const Source = struct {
     grown: u32 = 0,
     /// This request's under-the-base warning was logged.
     warned: bool = false,
+    /// The stream's counters where this request's prompt and decode phases began (`meters`), and its lines.
+    at_prompt: expert.Stats = .{},
+    at_decode: expert.Stats = .{},
+    meter_buf: [1024]u8 = undefined,
 
     /// The bank in `dir` at the rows `budget` holds, slot arrays on `s` (the trunk's stream). `first_layer`: the model
     /// layer of bank layer 0. Takes the process's one expert reader.
@@ -406,6 +411,7 @@ pub const Source = struct {
     pub fn setPhase(self: *Source, p: Phase) !void {
         if (p == self.phase) return;
         try self.stream.flush();
+        if (p == .decode) self.at_decode = self.stream.stats() else self.at_prompt = self.stream.stats();
         switch (p) {
             .decode => {
                 _ = try self.stream.releaseTransient();
@@ -426,6 +432,18 @@ pub const Source = struct {
             },
         }
         self.phase = p;
+    }
+
+    /// The request's `[stream-stats]` lines by phase (the host's `Bank.meters`): the stream's counters since the prompt
+    /// began, and since decode began.
+    pub fn meters(self: *Source) []const u8 {
+        const now = self.stream.stats();
+        const prompt = (if (self.phase == .decode) self.at_decode else now).since(self.at_prompt);
+        const decode: expert.Stats = if (self.phase == .decode) now.since(self.at_decode) else .{};
+        const a = stream_stats.line(&self.meter_buf, "prompt", prompt) catch return "";
+        const b = stream_stats.line(self.meter_buf[a.len + 1 ..], "decode", decode) catch return a;
+        self.meter_buf[a.len] = '\n';
+        return self.meter_buf[0 .. a.len + 1 + b.len];
     }
 
     const PlanKind = enum { decode, trim };
@@ -558,3 +576,4 @@ fn joinSources(s: mlx.mlx_stream, a: std.mem.Allocator, sources: *std.ArrayList(
     sources.clearRetainingCapacity();
     try sources.append(a, joined);
 }
+

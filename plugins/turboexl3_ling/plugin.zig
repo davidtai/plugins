@@ -285,6 +285,7 @@ fn openBank(ctx: *const abi.LoadCtx, geo: *const abi.BankGeometry, budget: abi.B
         .settle = &Bank.settle,
         .phase = &Bank.phase,
         .read_ahead = &Bank.readAhead,
+        .meters = &Bank.meters,
     };
     return .ok;
 }
@@ -324,6 +325,9 @@ const Bank = struct {
     }
     fn readAhead(ctx: ?*anyopaque, layer: u32, ids: [*]const u16, n: usize) callconv(.c) Verdict {
         return done(of(ctx).readAhead(layer, ids[0..n]));
+    }
+    fn meters(ctx: ?*anyopaque, out: *abi.Str) callconv(.c) void {
+        out.* = .of(of(ctx).meters());
     }
 };
 
