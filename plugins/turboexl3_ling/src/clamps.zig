@@ -8,7 +8,7 @@ const std = @import("std");
 
 pub const max_layers = 512;
 
-pub const Error = error{ LingClampListLength, LingClampValue };
+pub const Error = error{ LingClampListLength, LingClampValue, LingClampDisagrees };
 
 var routed_limits: [max_layers]u8 = @splat(0);
 var shared_limits: [max_layers]u8 = @splat(0);
@@ -46,6 +46,21 @@ fn list(v: ?std.json.Value, n_layers: usize, out: *[max_layers]u8) Error!void {
     }
 }
 
+/// A post-SiLU limit the host passes (`BankGeometry.limitOut`, `Swiglu.limit_out`) as turboexl3's clamp: 0 none, else an
+/// integer 1..128; anything else is refused by name.
+pub fn ofHost(v: f32) Error!u32 {
+    if (!std.math.isFinite(v) or v < 0 or v > 128 or v != @floor(v)) return error.LingClampValue;
+    return @intFromFloat(v);
+}
+
+/// Routed layer `layer`'s clamp where the host passes it (`host`: its post-SiLU limit), checked against the pack's own
+/// list: the host reads the same config.json, so a disagreement is refused by name, not served.
+pub fn routedFrom(layer: u32, host: f32) Error!u32 {
+    const h = try ofHost(host);
+    if (h != routed(layer)) return error.LingClampDisagrees;
+    return h;
+}
+
 const testing = std.testing;
 
 fn readJson(json: []const u8, n: usize) Error!void {
@@ -67,4 +82,16 @@ test "ling clamps: the two lists by layer, absent lists all 0, and malformed lis
     try testing.expectError(error.LingClampValue, readJson("{\"expert_swiglu_limit_list\":[0,-1,0]}", 3));
     try testing.expectError(error.LingClampValue, readJson("{\"expert_swiglu_limit_list\":[0,129,0]}", 3));
     try testing.expectError(error.LingClampValue, readJson("{\"share_expert_swiglu_limit_list\":[0,\"10\",0]}", 3));
+}
+
+test "ling clamps: the host's post-SiLU limit taken as an integer clamp and checked against the pack's list" {
+    try readJson("{\"expert_swiglu_limit_list\":[0,0,10]}", 3);
+    try testing.expectEqual(@as(u32, 10), try routedFrom(2, 10));
+    try testing.expectEqual(@as(u32, 0), try routedFrom(1, 0));
+    try testing.expectError(error.LingClampDisagrees, routedFrom(2, 0));
+    try testing.expectError(error.LingClampDisagrees, routedFrom(1, 7));
+    try testing.expectError(error.LingClampValue, ofHost(9.5));
+    try testing.expectError(error.LingClampValue, ofHost(-1));
+    try testing.expectError(error.LingClampValue, ofHost(std.math.nan(f32)));
+    try testing.expectEqual(@as(u32, 128), try ofHost(128));
 }

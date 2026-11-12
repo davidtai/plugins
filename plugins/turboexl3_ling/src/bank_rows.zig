@@ -1,6 +1,5 @@
-//! The expert bank's slot rows at the budgets it opens with, MLX-free: each phase's whole rows past its windows and the
-//! read pool's staging (src/streamed/ling_source.zig `billBank`). The arithmetic RQ's plans took per request in the
-//! model plugin; as a quant plugin the bank opens once at the host's budget (`open_bank`), so only this part stays.
+//! The expert bank's slot rows, MLX-free: each phase's whole rows at the budgets it opens with, past its windows and the
+//! read pool's staging (src/ling_bank.zig `Bill`), and C5's plans against the host's real KV at each phase (below).
 
 const std = @import("std");
 
@@ -24,6 +23,56 @@ pub fn rowsOf(bank: Bank, budget: Budget) error{StreamedRowsDoNotFit}!Rows {
     const d = rowsIn(bank, budget.decode, bank.decode_windows + bank.staging);
     if (p == 0) return error.StreamedRowsDoNotFit;
     return .{ .prompt = @intCast(@min(p, n)), .decode = @intCast(@min(@max(d, p), n)) };
+}
+
+// ── C5: the bank against the host's real KV ──
+//
+// The host bills a streamed model's prompt at 0 (mlx-serve `prefill_chunk.zig` `prefillNeededAtChunk`: "a longer prompt
+// is the plugin's refusal by name"), and its room for the bank (`driver.zig` `streamRoomAt`) holds one prompt of 16K + 1K.
+// So the bank reads what the host has really allocated, KV included, from its headroom (`Host.memoryCeiling`: the
+// host's ceiling less what is resident), and plans each phase from it, as the model plugin's RQ did (C5, main's ruling
+// 2026-11-11):
+// - a prompt forward whose headroom holds less than one slot row (the pass is at the host's ceiling) is under the base
+//   and refused by name, before its calls run;
+// - a decode or trim plan under the base by at most the rows `free_ram` covers keeps the bank at its base with a named
+//   warning; past that cover it is refused by name;
+// - a decode plan above the base grows to at most the decode rows the headroom holds past `free_ram` (a trim below the
+//   load's decode rows is logged).
+
+/// The free RAM a decode plan keeps past the host's headroom (the model plugin's `free_ram`).
+pub const free_ram: u64 = 4 << 30;
+
+pub const Verdict = enum { fits, warn, refuse };
+/// A plan's rows (what the bank takes), the whole rows the headroom holds (`held`, under the base when below it) and
+/// its verdict.
+pub const Plan = struct { rows: u32, held: i64, verdict: Verdict };
+
+/// The bank's whole rows `free_ram` holds: 12 of Ling-3.1's 336,427,008 B rows.
+pub fn coverRows(row_bytes: u64) u64 {
+    return free_ram / row_bytes;
+}
+
+/// The rows the bank may hold with `now` rows held and `headroom` bytes past them, keeping `reserve` free.
+pub fn heldAt(row_bytes: u64, now: u32, headroom: u64, reserve: u64) i64 {
+    const n: i64 = now;
+    if (headroom >= reserve) return n + @as(i64, @intCast((headroom - reserve) / row_bytes));
+    return n - @as(i64, @intCast(std.math.divCeil(u64, reserve - headroom, row_bytes) catch unreachable));
+}
+
+/// A decode plan (at the phase change, `now` the base rows) or a trim (at a decode forward's settle, `now` the rows
+/// grown): `rows` the decode rows to grow to, at most the load's.
+pub fn decodePlan(rows: Rows, row_bytes: u64, now: u32, headroom: u64) Plan {
+    const held = heldAt(row_bytes, now, headroom, free_ram);
+    const base: i64 = rows.prompt;
+    if (held >= base) return .{ .rows = @intCast(@min(held, rows.decode)), .held = held, .verdict = .fits };
+    const under: u64 = @intCast(base - held);
+    return .{ .rows = rows.prompt, .held = held, .verdict = if (under <= coverRows(row_bytes)) .warn else .refuse };
+}
+
+/// A prompt forward's plan at its calls: under the base when its headroom holds less than one row.
+pub fn promptPlan(rows: Rows, row_bytes: u64, headroom: u64) Plan {
+    const held = heldAt(row_bytes, rows.prompt, headroom, row_bytes);
+    return .{ .rows = rows.prompt, .held = held, .verdict = if (held < rows.prompt) .refuse else .fits };
 }
 
 // ── tests ──
@@ -56,4 +105,38 @@ test "bank rows: each phase's whole rows past its windows and staging, decode at
 
 test "bank rows: a prompt budget that holds no row past its windows and staging is refused" {
     try testing.expectError(error.StreamedRowsDoNotFit, rowsOf(served, .{ .prompt = served.prompt_windows + served.staging + served.row_bytes - 1, .decode = 1 << 40 }));
+}
+
+test "C5: a decode plan grows to the rows the headroom holds past free RAM, at most the load's decode rows" {
+    const rows: Rows = .{ .prompt = 214, .decode = 236 };
+    const row = served.row_bytes;
+    // Room for 30 rows past free RAM: the load's 236.
+    try testing.expectEqual(Plan{ .rows = 236, .held = 244, .verdict = .fits }, decodePlan(rows, row, 214, free_ram + 30 * row));
+    // Room for 10: a trim to 224.
+    try testing.expectEqual(Plan{ .rows = 224, .held = 224, .verdict = .fits }, decodePlan(rows, row, 214, free_ram + 10 * row + 5));
+    // Exactly free RAM: the base.
+    try testing.expectEqual(Plan{ .rows = 214, .held = 214, .verdict = .fits }, decodePlan(rows, row, 214, free_ram));
+}
+
+test "C5: a decode or trim plan under the base by at most the rows free RAM covers (12) warns; past it, refused" {
+    const rows: Rows = .{ .prompt = 214, .decode = 236 };
+    const row = served.row_bytes;
+    try testing.expectEqual(@as(u64, 12), coverRows(row));
+    // 12 rows short of free RAM: 12 under the base, a warning at the base.
+    try testing.expectEqual(Plan{ .rows = 214, .held = 202, .verdict = .warn }, decodePlan(rows, row, 214, free_ram - 12 * row));
+    // 13 rows short: refused.
+    try testing.expectEqual(Verdict.refuse, decodePlan(rows, row, 214, free_ram - 12 * row - 1).verdict);
+    try testing.expectEqual(Verdict.refuse, decodePlan(rows, row, 214, 0).verdict);
+    // A trim with the bank grown to 230: the headroom past those rows.
+    try testing.expectEqual(Plan{ .rows = 232, .held = 232, .verdict = .fits }, decodePlan(rows, row, 230, free_ram + 2 * row));
+    try testing.expectEqual(Verdict.warn, decodePlan(rows, row, 214, free_ram - 1).verdict);
+}
+
+test "C5: a prompt forward with less than one row of headroom is under the base and refused" {
+    const rows: Rows = .{ .prompt = 214, .decode = 236 };
+    const row = served.row_bytes;
+    try testing.expectEqual(Verdict.fits, promptPlan(rows, row, row).verdict);
+    try testing.expectEqual(Verdict.fits, promptPlan(rows, row, 40 << 30).verdict);
+    try testing.expectEqual(Plan{ .rows = 214, .held = 213, .verdict = .refuse }, promptPlan(rows, row, row - 1));
+    try testing.expectEqual(Verdict.refuse, promptPlan(rows, row, 0).verdict);
 }

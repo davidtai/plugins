@@ -1,30 +1,12 @@
 turboexl3_ling builds against the mlx-serve plugin kit and turboexl3 (build.zig.zon, by URL and hash). It vendors
-nothing: the code below came from mlx-serve, which no longer carries it, and is maintained here (no copy to sync).
+nothing: its routed experts stream over the kit's expert stream (`kit.streamed`), which the kit ships.
 
---------------------------------------------------------------------------------
-mlx-serve
-https://github.com/ddalcu/mlx-serve
-Copyright (c) 2026 David Dalcu
-Licensed under the MIT License.
+src/host_shims.zig is this plugin's code standing in for mlx-serve's C++ shims over MLX's private headers (the kit
+stream's event, alloc and launch-cache symbols, served over the server's host table).
 
-src/streamed/ is mlx-serve's expert streamer as it stood at ddalcu/mlx-serve bc6c5f2c (its src/sdk/weights/streamed/,
-with the EXL3 lane's types from src/sdk/quant/exl3/stream/ in src/streamed/exl3lane/), before mlx-serve replaced it with
-the kit's generic stream (#1131): the files Ling's bank source reaches, with this plugin's edits (Ling's stream seams,
-the imports pointed at this plugin's files, the module-owned arch SDK and the tests left out; each file's first line
-names its mlx-serve path). src/streamed/ling_source.zig, src/ling_*.zig, src/bank_rows.zig and src/clamps.zig are this
-plugin's own code. src/host/{env,log,shared}.zig and src/host_shims.zig are this plugin's code standing in for
-mlx-serve's registry, log, unit globals and C++ shims over MLX's private headers.
-
---------------------------------------------------------------------------------
-mlx-stream
-https://github.com/davidtai/mlx-stream
-Copyright (c) 2026 David Tai
-Licensed under the MIT License.
-
-mlx-serve absorbed mlx-stream (the SSD expert streamer, its SDK and C read pool); src/streamed/ holds the parts Ling's
-bank reads. The packed expert record and manifest formats and the streamed-bank layout are David Tai's earlier work.
 ExLlamaV3 (https://github.com/turboderp-org/exllamav3, Copyright (c) turboderp, MIT): the EXL3 format the bank reads
-follows exllamav3; no exllamav3 code is shipped.
+follows exllamav3; no exllamav3 code is shipped. The packed expert record and manifest formats (expert-manifest-v2) are
+mlx-stream's (https://github.com/davidtai/mlx-stream, Copyright (c) 2026 David Tai, MIT), which mlx-serve absorbed.
 
 --------------------------------------------------------------------------------
 tests/fixtures/config-2.60bpw.json is the config.json of turboderp/Ling-3.1-flash-exl3 (branch 2.60bpw, revision

@@ -1,9 +1,7 @@
-//! turboexl3_ling's routed combine at prompt rows (COMBINE, exact): a wide (prompt) routed call goes through the copied
-//! streamer's JOINLESS route (`Hook.routedParts`: the waves' outputs unjoined, each pair's (source, row)) and
-//! turboexl3's Ling combine over them in one launch (`root.ling.combineParts`), in place of the join (`concatenate` +
-//! `take`) and the three MLX ops of `Source.rows` (`sum(multiply(astype(routed, f32), expand_dims(weights, -1)), -2)`),
-//! whose words it gives (turboexl3's combine_test.zig). Decode calls keep their path. The copied source (the overlay's
-//! ling_source.zig `partsSum`) calls it through `mlx_host`.
+//! turboexl3_ling's routed combine at prompt rows (COMBINE, exact): a prompt call's outputs stay unjoined (one source a
+//! slot bank's rows-path call, each pair's (source, row)) and turboexl3's Ling combine sums them over the routes' weights
+//! in one launch (`root.ling.combineParts`), the words of the join's take and `sum(multiply(astype(routed, f32),
+//! expand_dims(weights, -1)), -2)` (turboexl3's combine_test.zig). src/ling_bank.zig calls it.
 const mlx = @import("mlx_serve").mlx;
 const t3 = @import("turboexl3");
 

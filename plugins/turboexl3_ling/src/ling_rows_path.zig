@@ -4,8 +4,7 @@
 //! the gathered bf16 copy, the f32 copy and the prepare's f32 read become one bf16 read in the prepare. The prepare
 //! rounds each x value to f16 through f32 whatever x's dtype, and the finish stores the one f32 sum, so every row's bytes
 //! are the chain's (turboexl3's models/ling/rows_test.zig holds them to this chunk's take + f32 + `moeLing`, on the
-//! loader's views). The call's x is cast to bf16 once where it is not (the chunks' own rounding; the streamer hands
-//! every prompt call bf16). Decode waves and cold rows keep their paths.
+//! loader's views). The call's x is cast to bf16 once where it is not (the chunks' own rounding). Decode waves and cold rows keep their paths.
 const mlx = @import("mlx_serve").mlx;
 const t3 = @import("turboexl3");
 

@@ -1,42 +1,22 @@
 //! turboexl3_ling: Ling-3.1-flash's exllamav3 (EXL3) streaming packs, as a quant plugin. mlx-serve's own bailing_hybrid
 //! serves the pack (its forward: KDA, MLA, the grouped MoE, the head); this plugin loads the trunk's trellis linears the
 //! pack stores and runs them on turboexl3's Metal kernels, and streams the routed experts of layers 4..71 from the pack's
-//! `experts.bin` (`open_bank`: the expert streamer in src/streamed/, module `mlx_stream`, with Ling's bank source
-//! `ling_source` and its routed math on turboexl3, src/ling_math.zig). The template is turboexl3_ds41.
-//!
-//! The streamer reaches this root as `mlx_host`: MLX, the host's log, the environment, the process globals, and the
-//! plugin modules its Ling source calls (`ling_math`, `ling_combine`, `ling_ran`, `bank_rows`, `ling_router`).
+//! `experts.bin` over the kit's expert stream (`open_bank`, src/ling_bank.zig), their math on turboexl3. The template is
+//! turboexl3_ds41.
 
 const std = @import("std");
 const kit = @import("mlx_serve");
 const abi = kit.abi.quant;
 const t3 = @import("turboexl3");
 const tkit = @import("turboexl3_kit");
-const stream = @import("mlx_stream");
 const shims = @import("src/host_shims.zig");
 const clamps = @import("src/clamps.zig");
+const ling_math = @import("src/ling_math.zig");
+const log = @import("src/host/log.zig");
+const LingSource = @import("src/ling_bank.zig");
 pub const config = @import("config.zig");
 
-// ── what the streamer reads through `mlx_host` ──
-
-pub const mlx = kit.mlx;
-pub const log = @import("src/host/log.zig");
-pub const env = @import("src/host/env.zig");
-pub const shared = @import("src/host/shared.zig");
-pub const ling_math = @import("src/ling_math.zig");
-pub const ling_combine = @import("src/ling_combine.zig");
-pub const ling_ran = @import("src/ling_ran.zig");
-pub const bank_rows = @import("src/bank_rows.zig");
-/// ROUTER_FUSED's handoff (the model plugin's router launch scored the bank's read-ahead with the next layer's gate) has
-/// no caller here: mlx-serve's bailing_hybrid runs the router. The bank scores its read-ahead from the gates itself
-/// (experts.zig `scoresOf`, src/ling_predictor.zig), as it did before ROUTER_FUSED.
-pub const ling_router = struct {
-    pub fn takeScores(layer: u32, rows: u32) ?mlx.mlx_array {
-        _ = layer;
-        _ = rows;
-        return null;
-    }
-};
+const mlx = kit.mlx;
 
 /// Shown at install and in Settings.
 pub const version = "0.2.0";
@@ -58,6 +38,7 @@ pub const table = abi.QuantTable{
     .swiglu = &swiglu,
     .bank_rows = &bankRows,
     .open_bank = &openBank,
+    .swiglu_limit_out = true,
 };
 
 const Verdict = abi.Verdict;
@@ -76,7 +57,7 @@ fn open(ctx: *abi.LoadCtx) callconv(.c) Verdict {
     config.checkPack(ctx.block_json.slice(), ctx.config_json.slice(), ctx.dir) catch |e| return Verdict.named(.unsupported, @errorName(e));
     // Kernels from the server's cache, launched through its launcher; MLX's matrix units only where its NAX gate holds.
     tkit.bind(h.t);
-    // The streamer's events, slot buffers and launches, and its log lines, through the server's table.
+    // The kit stream's events, slot buffers and launches, and the plugin's log lines, through the server's table.
     if (!shims.install(ctx.host)) return Verdict.refuse(.unsupported, "turboexl3_ling: the server's host table is older than this plugin's kit");
     log.use(h);
     if (!tkit.nax.available()) return no_nax;
@@ -229,38 +210,46 @@ fn moe(_: *const abi.Weight, _: abi.Array, _: abi.Array, _: abi.Array, _: bool, 
     return Verdict.refuse(.unsupported, "turboexl3_ling: routed experts run through swiglu");
 }
 
-/// Resident routed experts (a format bank: the MTP head's) on turboexl3's Ling SwiGLU. `Swiglu.limit` is a clamp on the
-/// gate's input (GLM's); Ling-3.1 clamps after the SiLU and its MTP layer clamps nothing, so a clamped call is refused.
+/// Resident routed experts (a format bank: the MTP head's) on turboexl3's Ling SwiGLU. `Swiglu.limit_out` (> 0) is
+/// Ling-3.1's clamp after the SiLU, which the table declares (`swiglu_limit_out`); `Swiglu.limit` is a clamp on the gate's
+/// input (GLM's), which Ling never asks, so a call with it is refused.
 fn swiglu(gate: *const abi.Weight, up: *const abi.Weight, down: *const abi.Weight, x: abi.Array, inds: abi.Array, scores: abi.Array, opts: *const abi.Swiglu, s: abi.Stream, out: *abi.Array) callconv(.c) Verdict {
     if (inds.ctx == null) return Verdict.refuse(.unsupported, "turboexl3_ling: a dense SwiGLU runs the caller's chain");
     if (opts.limit != 0) return Verdict.refuse(.unsupported, "turboexl3_ling: a gate-input clamp (Ling-3.1 clamps after the SiLU)");
+    const limit = clamps.ofHost(limitOut(opts)) catch |e| return Verdict.named(.unsupported, @errorName(e));
     const bank: t3.Bank = .{ .gate = projOf(gate), .up = projOf(up), .down = projOf(down) };
     const st: mlx.mlx_stream = .{ .ctx = s.ctx };
-    const y = t3.moeLing(st, arr(x), bank, arr(inds), arr(scores), dec, 0) catch |e| return Verdict.named(.failed, @errorName(e));
+    const y = t3.moeLing(st, arr(x), bank, arr(inds), arr(scores), dec, @intCast(limit)) catch |e| return Verdict.named(.failed, @errorName(e));
     out.* = .{ .ctx = y.ctx };
     return .ok;
 }
 
+/// `opts.limit_out` where the caller's struct reaches it (a host built before the field passes a shorter one: none).
+fn limitOut(opts: *const abi.Swiglu) f32 {
+    return if (opts.size >= @offsetOf(abi.Swiglu, "limit_out") + @sizeOf(f32)) opts.limit_out else 0;
+}
+
 // ── the streamed bank (`experts.bin`) ──
 
-const io = std.Io.Threaded.global_single_threaded.io();
-const LingSource = stream.ling_source;
-
 /// The bank's geometry: the host's (`BankGeometry`, every trunk layer) past the pack's dense layers, with each routed
-/// layer's clamp after the SiLU (src/clamps.zig) and the router's groups (the read-ahead's predictor picks by them).
+/// layer's clamp after the SiLU: the host's (`limitOut`) where its geometry reaches `limits_out`, checked against the
+/// pack's config.json list (src/clamps.zig `routedFrom`); the config's list alone on a host built before the field.
 /// `limits` holds `n_layers - first` entries.
 fn geometry(geo: *const abi.BankGeometry, l: config.Ling, limits: []c_int) !LingSource.Geometry {
     if (geo.n_layers != l.layers or l.first >= geo.n_layers) return error.LingBankGeometry;
     const n_moe = geo.n_layers - l.first;
     if (limits.len != n_moe) return error.LingBankGeometry;
-    for (limits, l.first..) |*o, li| o.* = @intCast(clamps.routed(@intCast(li)));
-    return .{ .hidden_size = geo.hidden, .moe_intermediate_size = geo.inter, .n_experts_per_tok = geo.top_k, .n_routed_experts = geo.n_experts, .n_layers = n_moe, .limits = limits, .n_group = l.n_group, .topk_group = l.topk_group };
+    const host = geo.size >= @offsetOf(abi.BankGeometry, "limits_out") + @sizeOf(?[*]const f32);
+    for (limits, l.first..) |*o, li| {
+        const layer: u32 = @intCast(li);
+        o.* = @intCast(if (host) try clamps.routedFrom(layer, geo.limitOut(layer)) else clamps.routed(layer));
+    }
+    return .{ .hidden_size = geo.hidden, .moe_intermediate_size = geo.inter, .n_experts_per_tok = geo.top_k, .n_routed_experts = geo.n_experts, .n_layers = n_moe, .limits = limits };
 }
 
 fn budgetOf(b: abi.BankBudget) LingSource.Budget {
-    // TODO(box): the host's room is priced by bailing_hybrid's prefill_bytes (the engine's arithmetic, not memfit's). The
-    // served plugin's bill (src/bill.zig, memfit v3) gave the bank 214 / 236 rows at 18K; re-fit the decode term's
-    // give-back (turboexl3_ds41's `budgetOf` adds its own) from the new shape's [mem] peaks before the A/B.
+    // TODO(box): the host's room is bailing_hybrid's prefill_bytes (the engine's arithmetic, not the model plugin's
+    // memfit); the served bank had 214 prompt / 236 decode rows at 18K. Re-fit from the new shape's [mem] peaks.
     return .{ .prompt = b.prompt, .decode = b.decode };
 }
 
@@ -274,35 +263,21 @@ fn bankRows(ctx: *const abi.LoadCtx, geo: *const abi.BankGeometry, budget: abi.B
     const limits = gpa.alloc(c_int, geo.n_layers -| l.first) catch return oom;
     defer gpa.free(limits);
     const g = geometry(geo, l, limits) catch |e| return Verdict.named(.unsupported, @errorName(e));
-    const b = LingSource.billOf(gpa, io, ctx.model_dir.slice(), g, budgetOf(budget)) catch |e| return bankRefusal(e);
+    const b = LingSource.billOf(gpa, ctx.model_dir.slice(), g, budgetOf(budget)) catch |e| return bankRefusal(e);
     out.* = .{ .prompt = b.rows.prompt, .decode = b.rows.decode, .row_bytes = b.row_bytes };
     return .ok;
 }
-
-/// The bank the host holds (`abi.Bank.ctx`): the source and the predictor's gates it borrows.
-const Held = struct {
-    src: *LingSource.Source,
-    /// Each routed layer's router as [experts, hidden] (the host's gates are [hidden, experts] views) and its bias.
-    gates: []LingSource.Gate,
-
-    fn deinit(self: *Held) void {
-        self.src.deinit();
-        for (self.gates) |g| _ = mlx.mlx_array_free(g.w);
-        gpa.free(self.gates);
-        gpa.destroy(self);
-    }
-};
 
 /// The load line's account of the one bank a process streams.
 var about: [160]u8 = undefined;
 
 fn openBank(ctx: *const abi.LoadCtx, geo: *const abi.BankGeometry, budget: abi.BankBudget, out: *abi.Bank) callconv(.c) Verdict {
     if (!tkit.nax.available()) return no_nax;
-    const held = openHeld(ctx, geo, budget) catch |e| return bankRefusal(e);
-    const src = held.src;
+    const src = openSource(ctx, geo, budget) catch |e| return bankRefusal(e);
     const line = std.fmt.bufPrint(&about, "{d} prompt / {d} decode slot rows per layer ({d} B a row)", .{ src.bill.rows.prompt, src.bill.rows.decode, src.bill.row_bytes }) catch "";
+    log.info("[turboexl3_ling] streamed experts: {s}\n", .{line});
     out.* = .{
-        .ctx = held,
+        .ctx = src,
         .close = &Bank.close,
         .about = .of(line),
         .decode_ids = @intCast(LingSource.decode_route_ids),
@@ -314,42 +289,19 @@ fn openBank(ctx: *const abi.LoadCtx, geo: *const abi.BankGeometry, budget: abi.B
     return .ok;
 }
 
-fn openHeld(ctx: *const abi.LoadCtx, geo: *const abi.BankGeometry, budget: abi.BankBudget) !*Held {
+fn openSource(ctx: *const abi.LoadCtx, geo: *const abi.BankGeometry, budget: abi.BankBudget) !*LingSource.Source {
     const l = config.lingOf(ctx.config_json.slice()) orelse return error.LingBankGeometry;
-    const host_gates = geo.gates orelse return error.LingBankNoGates;
     const limits = try gpa.alloc(c_int, geo.n_layers -| l.first);
     defer gpa.free(limits);
     const g = try geometry(geo, l, limits);
-    const s: mlx.mlx_stream = .{ .ctx = ctx.stream.ctx };
-    // The predictor reads each routed layer's router as [experts, hidden] (`Math.predictorScores`: x @ w^T); the host
-    // hands the trunk's [hidden, experts] view. Residency only: the scores pick which records are read ahead.
-    // TODO(box): the host's gate is bf16 where the served plugin's was the pack's raw router; the read-ahead's picks may
-    // move (never an output byte). Check the [stream-stats] hit rate against 87046444's.
-    const gates = try gpa.alloc(LingSource.Gate, g.n_layers);
-    var made: usize = 0;
-    errdefer {
-        for (gates[0..made]) |x| _ = mlx.mlx_array_free(x.w);
-        gpa.free(gates);
-    }
-    for (gates, host_gates[l.first..geo.n_layers]) |*o, x| {
-        var w = mlx.mlx_array_new();
-        try mlx.check(mlx.mlx_transpose(&w, arr(x.w), s));
-        o.* = .{ .w = w, .bias = arr(x.bias) };
-        made += 1;
-    }
-    // PF_DFIN's whole-call rule reads the model's routing before the bank's first routed call (its warm-up).
+    // PF_DFIN's whole-call rule reads the model's routing.
     ling_math.routing = .{ .topk = g.n_experts_per_tok, .experts = g.n_routed_experts };
-    const src = try LingSource.Source.open(gpa, io, ctx.model_dir.slice(), s, g, gates, l.first, budgetOf(budget));
-    errdefer src.deinit();
-    const held = try gpa.create(Held);
-    held.* = .{ .src = src, .gates = gates };
-    log.info("[turboexl3_ling] streamed experts: {d} prompt / {d} decode slot rows per layer of {d} ({d} B a row of every layer)\n", .{ src.bill.rows.prompt, src.bill.rows.decode, g.n_routed_experts, src.bill.row_bytes });
-    return held;
+    return LingSource.Source.open(gpa, ctx.model_dir.slice(), .{ .ctx = ctx.stream.ctx }, g, l.first, budgetOf(budget));
 }
 
 /// `abi.Bank`'s entries over the source.
 const Bank = struct {
-    fn of(ctx: ?*anyopaque) *Held {
+    fn of(ctx: ?*anyopaque) *LingSource.Source {
         return @ptrCast(@alignCast(ctx.?));
     }
     fn done(r: anyerror!void) Verdict {
@@ -360,22 +312,18 @@ const Bank = struct {
         of(ctx).deinit();
     }
     fn rows(ctx: ?*anyopaque, layer: u32, x: abi.Array, idx: abi.Array, wts: abi.Array, out: *abi.Array) callconv(.c) Verdict {
-        const y = of(ctx).src.rows(layer, arr(x), arr(idx), arr(wts)) catch |e| return Verdict.named(.failed, @errorName(e));
+        const y = of(ctx).rows(layer, arr(x), arr(idx), arr(wts)) catch |e| return Verdict.named(.failed, @errorName(e));
         out.* = .{ .ctx = y.ctx };
         return .ok;
     }
     fn settle(ctx: ?*anyopaque) callconv(.c) Verdict {
-        return done(of(ctx).src.settle());
+        return done(of(ctx).settle());
     }
-    /// The host tells no request with the phase, so decode takes the rows the bank opened with (`Planner.none`; RQ's
-    /// per-request plan needs a host hook: the core-hooks plan's B rows).
     fn phase(ctx: ?*anyopaque, prompt: bool) callconv(.c) Verdict {
-        const r = of(ctx).src.setPhase(if (prompt) .prompt else .decode, LingSource.Planner.none);
-        _ = r catch |e| return Verdict.named(.failed, @errorName(e));
-        return .ok;
+        return done(of(ctx).setPhase(if (prompt) .prompt else .decode));
     }
     fn readAhead(ctx: ?*anyopaque, layer: u32, ids: [*]const u16, n: usize) callconv(.c) Verdict {
-        return done(of(ctx).src.readAhead(layer, ids[0..n]));
+        return done(of(ctx).readAhead(layer, ids[0..n]));
     }
 };
 

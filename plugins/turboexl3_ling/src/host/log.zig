@@ -1,5 +1,5 @@
-//! The streamer's log lines (the caller writes the newline) into the server's log, through the host table the plugin
-//! keeps at its load (`use`); none before it.
+//! The bank's log lines (the caller writes the newline) into the server's log, and the host's headroom (C5), through the
+//! host table the plugin keeps at its load (`use`); none before it.
 
 const kit = @import("mlx_serve");
 
@@ -19,6 +19,11 @@ pub fn warn(comptime fmt: []const u8, args: anytype) void {
 
 pub fn info(comptime fmt: []const u8, args: anytype) void {
     if (host) |h| h.log(.info, fmt, args);
+}
+
+/// The host's headroom (`Host.memoryCeiling`: its ceiling less what is resident, its KV included); null before `use`.
+pub fn headroom() ?u64 {
+    return if (host) |h| h.memoryCeiling() else null;
 }
 
 pub fn debug(comptime fmt: []const u8, args: anytype) void {

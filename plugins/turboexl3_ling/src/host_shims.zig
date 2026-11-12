@@ -1,7 +1,7 @@
-//! The C symbols the copied expert streamer calls that mlx-serve serves from C++ shims over MLX's private headers
+//! The C symbols the kit's expert stream calls that mlx-serve serves from C++ shims over MLX's private headers
 //! (sdk/weights/streamed/csrc: mlx_event_shim.cpp, mlx_alloc_shim.cpp, mlx_launch_cache.inc, q3_event_shim.mm), as this
 //! plugin's own, each over the server's host table (`abi.host`), which serves them from those same shims
-//! (src/host/plugin_host_impl.zig). The kit ships no MLX headers: a plugin reaches MLX's internals only through the
+//! (mlx-serve's src/host/plugin_host_impl.zig). The kit ships no MLX headers: a plugin reaches MLX's internals only through the
 //! table. `install` keeps the table at load, before the streamer opens; with none kept, every call refuses (kernels fall
 //! back to mlx-c's own).
 
@@ -53,10 +53,10 @@ fn arrays(xs: [*]const mlx.mlx_array) [*]const common.Array {
 // ── mlx_event_shim.cpp ──
 
 /// The event shim's ABI version: the one these shims implement, which must be the streamer's
-/// (sdk_ext/expert/event.zig `abi_version`), or an mlx-serve bump that changes the contract does not build.
+/// (the kit's streamed/expert/event.zig `abi_version`), or an mlx-serve bump that changes the contract does not build.
 const event_abi = 2026092801;
 comptime {
-    if (@import("mlx_stream").event_abi != event_abi) @compileError("the expert streamer's event ABI changed: re-check src/host_shims.zig against mlx-serve's mlx_event_shim.cpp");
+    if (@import("mlx_serve").streamed.expert.event.abi_version != event_abi) @compileError("the kit stream's event ABI changed: re-check src/host_shims.zig against mlx-serve's mlx_event_shim.cpp");
 }
 
 export fn dsv41ev_abi() i32 {
