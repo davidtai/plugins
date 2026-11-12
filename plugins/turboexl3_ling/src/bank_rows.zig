@@ -15,6 +15,18 @@ pub fn rowsIn(bank: Bank, budget: u64, fixed: u64) u64 {
     return (budget -| fixed) / bank.row_bytes;
 }
 
+/// A bank phase.
+pub const Phase = enum { prompt, decode };
+
+/// The bank's bytes in `phase` (`b`: the bank's bill, `ling_bank.Bill`): the phase's rows, its windows and the read
+/// staging, as `rowsOf` budgets them. A bank-fit calibration subtracts these from the phase's measured peak.
+pub fn phaseBytes(b: anytype, phase: Phase) u64 {
+    return switch (phase) {
+        .prompt => @as(u64, b.rows.prompt) * b.row_bytes + b.prompt_windows + b.staging,
+        .decode => @as(u64, b.rows.decode) * b.row_bytes + b.decode_windows + b.staging,
+    };
+}
+
 /// Each phase's whole rows past its windows and the staging; the prompt at least one row, decode at least the
 /// prompt's, both at most a layer's experts.
 pub fn rowsOf(bank: Bank, budget: Budget) error{StreamedRowsDoNotFit}!Rows {
@@ -139,4 +151,12 @@ test "C5: a prompt forward with less than one row of headroom is under the base 
     try testing.expectEqual(Verdict.fits, promptPlan(rows, row, 40 << 30).verdict);
     try testing.expectEqual(Plan{ .rows = 214, .held = 213, .verdict = .refuse }, promptPlan(rows, row, row - 1));
     try testing.expectEqual(Verdict.refuse, promptPlan(rows, row, 0).verdict);
+}
+
+test "bank rows: a phase's bytes are its rows, its windows and the staging, as rowsOf budgets them" {
+    const bank: Bank = .{ .row_bytes = 100, .prompt_windows = 30, .decode_windows = 60, .staging = 7, .n_experts = 512 };
+    const rows = try rowsOf(bank, .{ .prompt = 1037, .decode = 2067 });
+    const b = .{ .row_bytes = bank.row_bytes, .prompt_windows = bank.prompt_windows, .decode_windows = bank.decode_windows, .staging = bank.staging, .rows = rows };
+    try std.testing.expectEqual(@as(u64, 10 * 100 + 30 + 7), phaseBytes(b, .prompt));
+    try std.testing.expectEqual(@as(u64, 20 * 100 + 60 + 7), phaseBytes(b, .decode));
 }

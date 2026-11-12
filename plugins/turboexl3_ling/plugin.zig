@@ -14,6 +14,7 @@ const clamps = @import("src/clamps.zig");
 const ling_math = @import("src/ling_math.zig");
 const log = @import("src/host/log.zig");
 const LingSource = @import("src/ling_bank.zig");
+const bank_rows = @import("src/bank_rows.zig");
 pub const config = @import("config.zig");
 
 const mlx = kit.mlx;
@@ -276,6 +277,10 @@ fn openBank(ctx: *const abi.LoadCtx, geo: *const abi.BankGeometry, budget: abi.B
     const src = openSource(ctx, geo, budget) catch |e| return bankRefusal(e);
     const line = std.fmt.bufPrint(&about, "{d} prompt / {d} decode slot rows per layer ({d} B a row)", .{ src.bill.rows.prompt, src.bill.rows.decode, src.bill.row_bytes }) catch "";
     log.info("[turboexl3_ling] streamed experts: {s}\n", .{line});
+    // The bank's bytes in each phase (its rows, windows and staging) beside the budget it planned from: a bank-fit
+    // calibration's input (`bank-fit.json`'s base = the phase's peak less these).
+    const b = src.bill;
+    log.info("[turboexl3_ling] bank bytes: prompt {d} B, decode {d} B (budget {d} / {d} B)\n", .{ bank_rows.phaseBytes(b, .prompt), bank_rows.phaseBytes(b, .decode), budget.prompt, budget.decode });
     out.* = .{
         .ctx = src,
         .close = &Bank.close,
