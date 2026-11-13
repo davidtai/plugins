@@ -27,14 +27,16 @@ pub fn phaseBytes(b: anytype, phase: Phase) u64 {
     };
 }
 
-/// Each phase's whole rows past its windows and the staging; the prompt at least one row, decode at least the
-/// prompt's, both at most a layer's experts.
+/// Each phase's whole rows past its windows and the staging, both at most a layer's experts, and each within its own
+/// budget. The kit's stream keeps the prompt's rows through decode (`Stream.grow` only adds rows, `Stream.shrink` only
+/// returns to the prompt's), so the prompt takes at most the decode budget's rows: decode never holds more than its
+/// own fit. At least one row in each phase.
 pub fn rowsOf(bank: Bank, budget: Budget) error{StreamedRowsDoNotFit}!Rows {
     const n: u64 = bank.n_experts;
-    const p = rowsIn(bank, budget.prompt, bank.prompt_windows + bank.staging);
-    const d = rowsIn(bank, budget.decode, bank.decode_windows + bank.staging);
+    const d = @min(rowsIn(bank, budget.decode, bank.decode_windows + bank.staging), n);
+    const p = @min(rowsIn(bank, budget.prompt, bank.prompt_windows + bank.staging), d);
     if (p == 0) return error.StreamedRowsDoNotFit;
-    return .{ .prompt = @intCast(@min(p, n)), .decode = @intCast(@min(@max(d, p), n)) };
+    return .{ .prompt = @intCast(p), .decode = @intCast(d) };
 }
 
 // ── C5: the bank against the host's real KV ──
@@ -102,21 +104,43 @@ const served: Bank = .{
     .n_experts = 512,
 };
 
-test "bank rows: each phase's whole rows past its windows and staging, decode at least the prompt's, both at most 512" {
+test "bank rows: each phase's whole rows past its windows and staging, the prompt at most decode's, both at most 512" {
     const r = try rowsOf(served, .{ .prompt = 69_998 * mib, .decode = 76_329 * mib });
     // (budget - windows - staging) / row, rounded down.
     try testing.expectEqual(@as(u32, @intCast((69_998 * mib - served.prompt_windows - served.staging) / served.row_bytes)), r.prompt);
     try testing.expectEqual(@as(u32, @intCast((76_329 * mib - served.decode_windows - served.staging) / served.row_bytes)), r.decode);
     try testing.expect(r.decode >= r.prompt);
-    // A decode budget below the prompt's keeps the prompt's rows; a budget past every expert stops at 512.
-    const low = try rowsOf(served, .{ .prompt = 69_998 * mib, .decode = 0 });
-    try testing.expectEqual(low.prompt, low.decode);
+    // A budget past every expert stops at 512.
     const huge = try rowsOf(served, .{ .prompt = 1 << 50, .decode = 1 << 50 });
     try testing.expectEqual(Rows{ .prompt = 512, .decode = 512 }, huge);
 }
 
-test "bank rows: a prompt budget that holds no row past its windows and staging is refused" {
+test "bank rows: a prompt or decode budget that holds no row past its windows and staging is refused" {
     try testing.expectError(error.StreamedRowsDoNotFit, rowsOf(served, .{ .prompt = served.prompt_windows + served.staging + served.row_bytes - 1, .decode = 1 << 40 }));
+    try testing.expectError(error.StreamedRowsDoNotFit, rowsOf(served, .{ .prompt = 1 << 40, .decode = served.decode_windows + served.staging + served.row_bytes - 1 }));
+}
+
+test "bank rows: a prompt budget past the decode fit takes decode's rows, and the decode bank stays within its budget" {
+    // A served load's terms and budgets (bfc3, run 2: the bank's bytes 62,839,508,992 B at 186 prompt rows and
+    // 63,076,986,880 B at 186 decode rows, against budgets that hold 186 and 182).
+    const bank: Bank = .{ .row_bytes = 336_427_008, .prompt_windows = 145_596_416, .decode_windows = 383_074_304, .staging = 118_489_088, .n_experts = 512 };
+    const budget: Budget = .{ .prompt = 62_934_480_832, .decode = 61_978_492_736 };
+    try testing.expectEqual(@as(u64, 186), rowsIn(bank, budget.prompt, bank.prompt_windows + bank.staging));
+    try testing.expectEqual(@as(u64, 182), rowsIn(bank, budget.decode, bank.decode_windows + bank.staging));
+    const r = try rowsOf(bank, budget);
+    try testing.expectEqual(Rows{ .prompt = 182, .decode = 182 }, r);
+    const b = .{ .row_bytes = bank.row_bytes, .prompt_windows = bank.prompt_windows, .decode_windows = bank.decode_windows, .staging = bank.staging, .rows = r };
+    try testing.expect(phaseBytes(b, .decode) <= budget.decode);
+    try testing.expect(phaseBytes(b, .prompt) <= budget.prompt);
+    // Every split of the two budgets: each phase's bytes within its own.
+    var prng = std.Random.DefaultPrng.init(5);
+    for (0..1000) |_| {
+        const bb: Budget = .{ .prompt = prng.random().uintLessThan(u64, 200 << 30), .decode = prng.random().uintLessThan(u64, 200 << 30) };
+        const rr = rowsOf(served, bb) catch continue;
+        const x = .{ .row_bytes = served.row_bytes, .prompt_windows = served.prompt_windows, .decode_windows = served.decode_windows, .staging = served.staging, .rows = rr };
+        try testing.expect(rr.prompt <= rr.decode);
+        try testing.expect(phaseBytes(x, .decode) <= bb.decode and phaseBytes(x, .prompt) <= bb.prompt);
+    }
 }
 
 test "C5: a decode plan grows to the rows the headroom holds past free RAM, at most the load's decode rows" {
