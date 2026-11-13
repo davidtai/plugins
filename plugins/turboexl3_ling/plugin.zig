@@ -40,6 +40,10 @@ pub const table = abi.QuantTable{
     .bank_rows = &bankRows,
     .open_bank = &openBank,
     .swiglu_limit_out = true,
+    // `matmul` at up to DECODE_ROWS_MAX rows runs turboexl3's decode GEMV (DEC-ONE to 4 rows, the chain past it, the
+    // one-row table at one row), whose every row has its one-row call's bytes at each of Ling's dense shapes
+    // (turboexl3's DEC-ONE byte test with those shapes and the served one-row launch). Past it the prompt GEMM.
+    .exact_rows = t3.kernels.DECODE_ROWS_MAX,
 };
 
 const Verdict = abi.Verdict;
