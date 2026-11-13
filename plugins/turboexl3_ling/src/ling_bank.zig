@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const stream_stats = @import("stream_stats.zig");
+const prompt_plan = @import("prompt_plan.zig");
 const kit = @import("mlx_serve");
 const mlx = kit.mlx;
 const expert = kit.streamed.expert;
@@ -316,26 +317,21 @@ pub const Source = struct {
             for (sources.items) |o| _ = mlx.mlx_array_free(o);
             sources.deinit(a);
         }
-        // The call's pairs grouped by expert (a counting sort, experts in id order): expert e's pairs are
-        // `order[first[e]..first[e + 1]]`.
+        // The call's pairs grouped by expert (src/prompt_plan.zig): expert e's pairs are `order[first[e]..first[e + 1]]`.
         const ne = self.bank.n_experts;
         const first = try a.alloc(u32, ne + 1);
         defer a.free(first);
-        @memset(first, 0);
-        for (ids) |e| first[e + 1] += 1;
-        for (1..ne + 1) |e| first[e] += first[e - 1];
         const order = try a.alloc(u32, ids.len);
         defer a.free(order);
         const fill = try a.alloc(u32, ne);
         defer a.free(fill);
-        @memcpy(fill, first[0..ne]);
-        for (ids, 0..) |e, i| {
-            order[fill[e]] = @intCast(i);
-            fill[e] += 1;
-        }
         var experts: std.ArrayList(u16) = .empty;
         defer experts.deinit(a);
-        for (0..ne) |e| if (first[e + 1] > first[e]) try experts.append(a, @intCast(e));
+        try prompt_plan.byExpert(ids, ne, first, order, fill, &experts, a);
+        // Each expert's slot row in the group's route (`slot_row[e]`) and bank (`bank_of[j]`, the group's j-th expert).
+        const slot_row = try a.alloc(u32, ne);
+        defer a.free(slot_row);
+        var bank_of: [S.max_route_ids]u8 = undefined;
         const pair_rows = try a.alloc(u32, ids.len + ling_math.gemm_min_rows);
         defer a.free(pair_rows);
         const pair_inds = try a.alloc(u32, ids.len + ling_math.gemm_min_rows);
@@ -357,16 +353,18 @@ pub const Source = struct {
                 try self.stream.waitDown(r, @intCast(p));
             }
             const banks = self.banksOf(bl);
-            for ([_]expert.BankKind{ .base, .ext, .transient }, 0..) |kind, bk| {
-                var m: usize = 0;
-                for (group, rf[0..group.len]) |e, ref| {
-                    if (ref.bank != kind) continue;
-                    for (order[first[e]..first[e + 1]]) |i| {
-                        pair_rows[m] = @intCast(i / k);
-                        pair_inds[m] = ref.row;
-                        pair_at[m] = i;
-                        m += 1;
-                    }
+            for (group, rf[0..group.len], bank_of[0..group.len]) |e, ref, *b| {
+                slot_row[e] = ref.row;
+                b.* = @intFromEnum(ref.bank);
+            }
+            // The banks in `banks`' order: base, ext, transient (`expert.BankKind`'s values).
+            for (0..3) |bk| {
+                // Every pair's call is its expert's bank's, the expert's pairs together in route order: a pair's math
+                // does not depend on which bank its expert sits in (src/prompt_plan.zig's residency test).
+                const m = prompt_plan.bankPairs(group, bank_of[0..group.len], @intCast(bk), first, order, pair_at);
+                for (pair_at[0..m], 0..) |i, j| {
+                    pair_rows[j] = @intCast(i / k);
+                    pair_inds[j] = slot_row[ids[i]];
                 }
                 if (m == 0) continue;
                 const src = sources.items.len;
