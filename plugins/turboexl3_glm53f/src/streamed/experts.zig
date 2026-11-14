@@ -32,7 +32,6 @@ const expert_policy = @import("sdk_ext.zig").expert.policy;
 const expert_stream = @import("expert/stream.zig");
 const expert_lookahead = @import("expert/lookahead.zig");
 const expert_event = sdk_ext.expert.event;
-const xk = @import("../exl3/kernels.zig");
 const sdk_ext = @import("sdk_ext.zig");
 const quant = @import("sdk_ext.zig").quant;
 const xq = @import("../exl3/quant.zig");
