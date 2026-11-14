@@ -8,10 +8,7 @@ const mlx = @import("sdk").mlx;
 const bank_mod = @import("bank.zig");
 const expert_policy = sdk_ext.expert.policy;
 const profile = @import("profile.zig");
-const route_trace = @import("route_trace.zig");
-const prefill_timeline = @import("prefill_timeline.zig");
 const gpu_warm = @import("gpu_warm.zig");
-const diag = @import("diag.zig");
 /// MiMo's bridge over the shared SDK stream (`stream_source.For`): its bank module, GatherQmm's {w, scales} slot bindings
 /// and its read pool's staging.
 const Mimo = @import("stream_source.zig").For(bank_mod, .{ .Arrays = sdk_ext.quant.GatherQmm.Arrays, .staging_bytes = io_staging_bytes });

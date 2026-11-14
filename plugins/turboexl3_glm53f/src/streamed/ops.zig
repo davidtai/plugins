@@ -16,12 +16,6 @@ const mlx = @import("sdk").mlx;
 const xk = @import("../exl3/kernels.zig");
 const sdk = @import("sdk");
 const sdk_ext = @import("sdk_ext.zig");
-const first_cycle = @import("profile/decode_first.zig");
-const prefill_timers = @import("profile/prefill_timers.zig");
-
-/// G7: the package's profile probes, injected into the quant and the kernel registry through the backend type
-/// (`sdk_ext.profile.of`); every probe compiles to nothing outside the profile builds.
-const package_profile: sdk_ext.profile.Hook = .{ .prefill = prefill_timers, .launch = first_cycle };
 
 pub const Dtype = mlx.mlx_dtype;
 pub const max_dims = 8;
@@ -107,7 +101,6 @@ const contexts_per_region = 2;
 
 pub const MlxOps = struct {
     pub const T = mlx.mlx_array;
-    pub const profile_hook = package_profile;
 
     gpa: std.mem.Allocator,
     s: mlx.mlx_stream,
@@ -624,7 +617,6 @@ pub const Op = enum {
 
 pub const TraceOps = struct {
     pub const T = u32;
-    pub const profile_hook = package_profile;
     pub const Node = struct { op: Op, dtype: Dtype, shape: Shape };
     /// What a host read returns on the trace backend (a test's script): the
     /// routed ids of each routing barrier and each greedy pick.

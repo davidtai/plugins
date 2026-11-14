@@ -9,10 +9,7 @@ const sdk_ext = @import("../sdk_ext.zig");
 const mlx = @import("sdk").mlx;
 const expert_policy = sdk_ext.expert.policy;
 const profile = @import("profile.zig");
-const route_trace = @import("route_trace.zig");
-const prefill_timeline = @import("prefill_timeline.zig");
 const gpu_warm = @import("gpu_warm.zig");
-const diag = @import("diag.zig");
 const shared = @import("stream.zig");
 const ReadSchedule = shared.ReadSchedule;
 const AutoSchedule = shared.AutoSchedule;
@@ -31,8 +28,6 @@ pub const Params = struct {
     /// The read pool's staging per worker: at least the bank's widest gate/up or down span, page-rounded, plus a page
     /// (`StreamOf.stagingBytes`).
     staging_bytes: u64,
-    /// Profile builds: the route trace's type (route_trace.zig `TraceOf`: u8 ids for at most 256 experts, MiMo's).
-    Trace: type = route_trace.Trace,
 };
 
 /// The bridge over `bank_mod` (an SDK bank module: `bank_mod.SDK` for `StreamOf`, its `Layer`, `n_components`, `mlxDtype`,
@@ -148,11 +143,6 @@ pub fn For(comptime bank_mod: type, comptime params: Params) type {
         pub const StreamSource = struct {
             stream: *Stream,
             calls: [n_routes]Call = @splat(.{}),
-            /// Profile builds only (`mimo-route-trace-v2`, `params.Trace`): the request's route trace, when one is armed.
-            trace: if (profile.enabled) ?*params.Trace else void = if (profile.enabled) null else {},
-            /// `MIMO_DIAG=missfree` (profile builds; the CPU tests): the decode phase's misses served from resident slots
-            /// (`diag.MissFree`). Owned by the source that armed it. `void` in a served build.
-            missfree: if (diag.compiled) ?*diag.MissFree else void = if (diag.compiled) null else {},
             /// P7 (`ReadSchedule`): the prompt routes, their release and the executor's read-ahead await, bound once
             /// (`installReadSchedule`); `early` takes a prompt call's groups from its hot order (`hotOrder`).
             prompt_route: *const fn (*StreamSource, u32, []const u16, []const f32) Error!*Route = routeStock,
@@ -303,7 +293,6 @@ pub fn For(comptime bank_mod: type, comptime params: Params) type {
             /// The scheduler writes it only after a route (the policy changes only in `route`), never per dispatch.
             pub fn residentLut(self: *const StreamSource, layer: u32, out: []u32) void {
                 if (layer < self.stream.bank.first_moe_layer) return @memset(out, 0);
-                if (comptime diag.compiled) if (self.missfree) |mf| if (self.decoding()) return self.missFreeLut(mf, layer, out);
                 const rel = self.relativeLayer(layer);
                 @import("../expert/stream.zig").lutOf(&self.stream.layers[rel].policy, self.stream, rel, out);
             }
@@ -322,11 +311,7 @@ pub fn For(comptime bank_mod: type, comptime params: Params) type {
             /// Stream.route submits both GU and down asynchronously. Neither wait
             /// runs here: the shared scheduler chooses when to consume each part.
             pub fn route(self: *StreamSource, layer: u32, ids: []const u16, scores: []const f32) Error!*Call {
-                if (comptime diag.compiled) if (self.missfree) |mf| if (self.decoding()) return self.routeMissFree(mf, layer, ids);
                 const r = try self.prompt_route(self, self.relativeLayer(layer), ids, scores);
-                if (comptime profile.enabled) if (self.decoding()) {
-                    if (self.trace) |t| t.decodeRoute(self.relativeLayer(layer), ids, &r.plan, scores);
-                };
                 const call = self.callOf(r);
                 call.* = .{ .route = r, .n_ids = @intCast(ids.len) };
                 _ = self.stream.refsOf(r, &call.refs);
@@ -360,7 +345,6 @@ pub fn For(comptime bank_mod: type, comptime params: Params) type {
                 // refuses it in decode, `NotPrefill`). A phase route. (The MTP verify, M <= 4, takes the decode lane since
                 // `Source.decodeLane`; this keeps any decode-phase M >= 5 call off the refusal.)
                 if (self.decoding()) return;
-                if (comptime profile.enabled) if (self.trace) |t| t.seed(self.relativeLayer(layer), ids);
                 return self.stream.seedPrefill(self.relativeLayer(layer), ids);
             }
             /// turboexl3_glm53f (`Wide.stage`): absolute layer `layer`'s experts no persistent row holds, in expert order, at
@@ -401,7 +385,6 @@ pub fn For(comptime bank_mod: type, comptime params: Params) type {
             /// Row vectors always use SDK routed-layer order, without a dense layer 0.
             pub fn grow(self: *StreamSource, rows: []const u32) !void {
                 try self.stream.grow(rows);
-                if (comptime diag.compiled) if (self.missfree) |mf| for (self.stream.layers, 0..) |*ls, l| try mf.fill(@intCast(l), &ls.policy);
             }
 
             // ── end MIMO_DIAG ──
@@ -466,8 +449,6 @@ pub fn For(comptime bank_mod: type, comptime params: Params) type {
 
             pub fn gate(self: *StreamSource, call: *Call) Error!?Gates {
                 const gates = try self.stream.gate(call.route.?);
-                // Profile builds: the prompt timeline's next tiles wait for the group's last down value (0: nothing read).
-                if (comptime prefill_timeline.enabled) prefill_timeline.gate(if (gates) |gt| gt.down_first + gt.n_parts - 1 else 0);
                 // X12 (`gpu_keep_warm: "waits"` / `"all"`): the call's gated parts (decode miss parts, a prompt group's reads)
                 // wait for values up to the last down part's; the warm engine keeps the GPU busy until the stream's event
                 // reaches it.

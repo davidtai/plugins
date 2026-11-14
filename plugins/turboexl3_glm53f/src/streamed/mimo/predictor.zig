@@ -15,7 +15,7 @@ pub const projection_rows: u32 = 1024;
 pub const Profile = struct {
     pub const enabled = profile.enabled;
     pub const now = profile.now;
-    pub const Mode = @import("../profile/prefill_timers.zig").Mode;
+    pub const Mode = enum { stream, base_seed, base_end };
     pub const charge = profile.charge;
     pub fn setMode(_: Mode) void {}
     pub fn countWideCall() void {}

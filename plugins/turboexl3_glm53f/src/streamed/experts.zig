@@ -35,10 +35,6 @@ const expert_event = sdk_ext.expert.event;
 const xk = @import("../exl3/kernels.zig");
 const sdk_ext = @import("sdk_ext.zig");
 const quant = @import("sdk_ext.zig").quant;
-const dt = @import("profile/decode_timers.zig");
-const timeline = @import("profile/verify_timeline.zig");
-const first_cycle = @import("profile/decode_first.zig");
-const prof = @import("profile/prefill_timers.zig");
 const xq = @import("../exl3/quant.zig");
 
 pub const max_route_ids = expert_policy.max_route_ids;
@@ -703,7 +699,7 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
     const EventProjection = if (@hasDecl(M, "EventProjection")) M.EventProjection(G.T) else Exl3EventProjection(G.T);
     const wide_event_gates = routes.gated and (if (@hasDecl(M, "wide_event_gates")) M.wide_event_gates else false);
     const predictor_decode_only = if (@hasDecl(M, "predictor_decode_only")) M.predictor_decode_only else false;
-    const wide_profile = if (@hasDecl(M, "Profile")) M.Profile else prof;
+    const wide_profile = M.Profile;
     const bound_decode_rows = if (@hasDecl(M, "decode_forward_rows")) M.decode_forward_rows else decode_forward_rows;
     comptime {
         assertSource(S);
@@ -1371,10 +1367,6 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             var id_buf: [max_route_ids]u16 = undefined;
             var score_buf: [expert_lookahead.max_rows * 512]f32 = undefined;
             var scores: []const f32 = &.{};
-            var tt = dt.now();
-            // A0 (profile builds): the call's barrier, route and MoE build (`first_cycle.call`).
-            const t_call = tt;
-            if (comptime timeline.enabled) timeline.point(layer, .call, self.readGauge(), false);
             // The installed decode-only predictor follows the source's phase; the last layer predicts nothing.
             const predict = if (comptime routes.lookahead and predictor_decode_only) self.source.decoding() else routes.lookahead;
             const sc: ?T = if (if (predict) self.predictorGate(layer) else null) |gate| try self.scoresOf(g, xf, gate) else null;
@@ -1396,22 +1388,7 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             if (n_bar > 1) try g.evalAll(bar[0..n_bar]);
             if (sc) |s| scores = try g.hostF32(s, score_buf[0 .. n * self.n_experts]);
             const ids = try g.hostIds(indices, id_buf[0..n_ids]);
-            tt = dt.charge(.barrier, tt);
-            const t_barrier = tt;
-            if (comptime timeline.enabled) timeline.point(layer, .barrier, 0, false);
-            // A0 (profile builds): the read gauge at the barrier's end; in the first cycle the tail set's reads (before
-            // the route plans); in the prompt the tail set itself (a decode-width prompt call).
-            const wall_b: u64 = if (comptime first_cycle.enabled and @hasDecl(S, "readWallNs")) self.source.readWallNs() else 0;
-            const tail_reads: u64 = if (comptime first_cycle.enabled and @hasDecl(S, "isResident")) first_cycle.tailReads(layer, ResidentAt{ .src = self.source, .layer = layer }, ResidentAt.of) else 0;
-            if (comptime first_cycle.enabled) {
-                first_cycle.tailRecord(layer, ids, n, k);
-                tt = dt.now();
-            }
-            const t_route0 = tt;
             const call = try self.source.route(layer, ids, scores);
-            const t_route = dt.charge(.route, tt);
-            dt.countCall();
-            if (comptime timeline.enabled) timeline.point(layer, .route, 0, false);
             var released = false;
             errdefer if (!released) self.source.release(call);
             const sv = self.source.served(call);
@@ -1431,30 +1408,22 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             // turboexl3_glm53f: SHARED_HOIST: committed only when the call misses (a miss wave waits for its bytes); a call
             // with no miss part leaves it to the next barrier's evaluation, where the trunk's add reads it.
             try self.post_hit(g, if (sv.n_parts > 0) hoist else &.{});
-            if (comptime timeline.enabled) timeline.point(layer, .hit, 0, false);
             if (routes.gated) {
                 if (try self.source.gate(call)) |gates| {
-                    if (comptime timeline.enabled) timeline.gate(layer, gates.gu, gates.down_first, gates.n_parts);
                     try self.gatedParts(g, layer, xf, k, sv, gates, &acc);
                 }
             } else for (0..sv.n_parts) |p| {
                 const part: u32 = @intCast(p);
-                tt = dt.now();
                 try self.source.waitGu(call, part);
-                _ = dt.charge(.read_wait, tt);
                 const wave = try self.gate_up_wave(self, g, layer, xf, k, sv, @intCast(p + 1), null);
                 try g.asyncEval(wave.h[0..wave.n]);
-                tt = dt.now();
                 try self.source.waitDown(call, part);
-                _ = dt.charge(.read_wait, tt);
                 try g.asyncEval(try self.down_wave(self, g, layer, &wave, &acc, null));
             }
             self.source.release(call);
             released = true;
             // DEVROUTE: the layer's next call reads the policy after this route (the other LUT of the pair).
             if (dev != null) try self.devLutAfterRoute(g, layer);
-            if (comptime timeline.enabled) timeline.point(layer, .end, self.readGauge(), sv.n_parts > 0);
-            if (comptime first_cycle.enabled) first_cycle.call(layer, t_barrier - t_call, t_route - t_route0, dt.now() - t_route, ids, sv.waves, wall_b, tail_reads);
             return if (comptime ending == .take) self.join(g, &acc, n, k) else joinIndexed(g, &acc, n, k);
         }
 
@@ -1651,8 +1620,6 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             var tp = wide_profile.now();
             _ = try g.hostIds(indices, w.ids.items);
             wide_profile.charge(.barrier, tp);
-            // A0 (profile builds): the prompt's last rows' experts.
-            if (comptime first_cycle.enabled) first_cycle.tailRecord(layer, w.ids.items, n, k);
             try w.first.resize(a, self.n_experts);
             @memset(w.first.items, -1);
             w.distinct.clearRetainingCapacity();
@@ -1931,364 +1898,3 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
         }
     };
 }
-
-// ── Tests ──
-
-const testing = std.testing;
-const TraceOps = ops.TraceOps;
-
-comptime {
-    assertSource(StreamSource);
-    assertSource(FakeSource);
-}
-
-/// Scripted host reads for the trace backend: the routed ids of each call.
-const Script = struct {
-    calls: []const []const u16,
-    next: usize = 0,
-
-    fn values(self: *Script) TraceOps.HostValues {
-        return .{ .ctx = self, .ids = ids, .argmax = argmax };
-    }
-
-    fn ids(ctx: *anyopaque, out: []u16) anyerror!void {
-        const self: *Script = @ptrCast(@alignCast(ctx));
-        if (self.next >= self.calls.len) return error.ScriptExhausted;
-        const c = self.calls[self.next];
-        self.next += 1;
-        if (c.len != out.len) return error.ScriptShape;
-        @memcpy(out, c);
-    }
-
-    fn argmax(_: *anyopaque) anyerror!u32 {
-        return error.NoPicks;
-    }
-};
-
-/// A wide-lane route that records every call: its rows, the bank it was
-/// handed and, from the fake source's live route, the served slots of the
-/// group (so the test can derive what each call should have been).
-const RecRoute = struct {
-    a: std.mem.Allocator,
-    calls: std.ArrayList(Rec) = .empty,
-    finishes: u32 = 0,
-
-    /// The source whose live route each call snapshots.
-    var source: ?*FakeSource = null;
-
-    const Rec = struct { slot: []u32, act_row: []u32, bank_code: u32, route: u64, refs: []SlotRef, at: usize, node: usize, act_dtype: ops.Dtype };
-
-    pub fn init(a: std.mem.Allocator) RecRoute {
-        return .{ .a = a };
-    }
-
-    pub fn deinit(self: *RecRoute, _: *TraceOps) void {
-        for (self.calls.items) |r| {
-            self.a.free(r.slot);
-            self.a.free(r.act_row);
-            self.a.free(r.refs);
-        }
-        self.calls.deinit(self.a);
-    }
-
-    pub fn finish(self: *RecRoute, _: *TraceOps) !void {
-        self.finishes += 1;
-    }
-};
-
-/// A test-only profile hook proves the optional math hook receives the shared
-/// schedule's charges without reading clocks or initializing MLX.
-const SmallPrefillProfile = struct {
-    pub const enabled = true;
-    pub const Mode = prof.Mode;
-    pub var wide_calls: u32 = 0;
-    pub var charges: u32 = 0;
-    pub fn now() u64 {
-        return 0;
-    }
-    pub fn charge(_: sdk_ext.profile.PrefillBucket, _: u64) void {
-        charges += 1;
-    }
-    pub fn setMode(_: Mode) void {}
-};
-
-const SmallPrefillMath = struct {
-    const Chain = EagerChain(TraceOps, TraceGemv);
-    pub const decode_forward_rows: u32 = 1;
-    pub const prefill_min_tokens: u32 = 2;
-    pub const wide_event_gates = true;
-    pub const Profile = SmallPrefillProfile;
-    d: Chain,
-    route: *RecRoute,
-    pub fn gateUp(self: *const SmallPrefillMath, g: *TraceOps, x: u32, ids: u32, gate: ProjOf(u32), up: ProjOf(u32)) !u32 {
-        return self.d.gateUp(g, x, ids, gate, up);
-    }
-    pub fn down(self: *const SmallPrefillMath, g: *TraceOps, h: u32, ids: u32, d: ProjOf(u32)) !u32 {
-        return self.d.down(g, h, ids, d);
-    }
-    pub fn prefill(self: *const SmallPrefillMath, g: *TraceOps, _: u32, x: u32, rows: quant.PrefillRows, bank: BankArraysOf(u32)) !u32 {
-        const mark = g.mark();
-        const y = g.keep(try self.route.call(g, x, rows, bank));
-        g.resetTo(mark);
-        return y;
-    }
-    pub fn finishPrefill(self: *const SmallPrefillMath, g: *TraceOps) !void {
-        return self.route.finish(g);
-    }
-};
-
-const SynthBank = expert_bank.SynthBank;
-
-/// One route's two decode calls (as the VERIFY_ENCODE hoist test's) through a hook built with or without HOIST_FIRST:
-/// the trace's nodes other than commits, the source's log, and per call the commits before its first host read and
-/// in all.
-const HoistRun = struct {
-    ops: std.ArrayList(ops.Op) = .empty,
-    shapes: std.ArrayList(ops.Shape) = .empty,
-    kinds: [32]u8 = undefined,
-    n_kinds: usize = 0,
-    before_read: [2]usize = .{ 0, 0 },
-    commits: [2]usize = .{ 0, 0 },
-    bound: bool = false,
-
-    fn deinit(r: *HoistRun, a: std.mem.Allocator) void {
-        r.ops.deinit(a);
-        r.shapes.deinit(a);
-    }
-
-    const Values = struct {
-        calls: []const []const u16,
-        next: usize = 0,
-        fn values(self: *Values) TraceOps.HostValues {
-            return .{ .ctx = self, .ids = ids, .argmax = argmax, .f32s = f32s };
-        }
-        fn ids(ctx: *anyopaque, out: []u16) anyerror!void {
-            const self: *Values = @ptrCast(@alignCast(ctx));
-            if (self.next >= self.calls.len) return error.ScriptExhausted;
-            const c = self.calls[self.next];
-            self.next += 1;
-            if (c.len != out.len) return error.ScriptShape;
-            @memcpy(out, c);
-        }
-        fn f32s(_: *anyopaque, out: []f32) anyerror!void {
-            @memset(out, 0);
-        }
-        fn argmax(_: *anyopaque) anyerror!u32 {
-            return error.NoPicks;
-        }
-    };
-
-};
-
-/// One routed call of the gated test scheduler (FakeSource, the eager chain), stock or MERGE_GATE_WAITS: its nodes, its
-/// waits' aliases, the waits it built, its parts and the banks its misses read.
-const MergeWaitsRun = struct {
-    nodes: []TraceOps.Node = &.{},
-    waits: []TraceOps.Wait = &.{},
-    calls: usize = 0,
-    parts: u32 = 0,
-    banks: usize = 0,
-
-    fn deinit(r: *MergeWaitsRun, a: std.mem.Allocator) void {
-        a.free(r.nodes);
-        a.free(r.waits);
-    }
-
-};
-
-/// A host-only architecture fixture whose router is already transposed and F32.
-const StageBPredictorMath = struct {
-    pub const predictor_decode_only = true;
-    inner: TraceMath,
-    pub fn predictorScores(g: *TraceOps, xf: u32, router: u32, correction: u32) !u32 {
-        return g.add(try g.sigmoid(try g.matmul(try g.astype(xf, .float32), router)), correction);
-    }
-    pub fn gateUp(self: *const StageBPredictorMath, g: *TraceOps, x: u32, ids: u32, gate: ProjOf(u32), up: ProjOf(u32)) !u32 {
-        return self.inner.gateUp(g, x, ids, gate, up);
-    }
-    pub fn down(self: *const StageBPredictorMath, g: *TraceOps, h: u32, ids: u32, bank: ProjOf(u32)) !u32 {
-        return self.inner.down(g, h, ids, bank);
-    }
-};
-
-/// A wide-lane route over a real Stream (trace backend) that names, per call row, the expert
-/// whose record its slot holds (verified byte for byte) and its act row; and records the live
-/// routes and the evals so far at the call.
-const StreamRec = struct {
-    a: std.mem.Allocator,
-    recs: std.ArrayList(Rec) = .empty,
-    finishes: u32 = 0,
-
-    var stream: ?*expert_stream.Stream = null;
-    var bank: ?*const SynthBank = null;
-    /// The hook's bound banks of the layer (to name a call's bank kind).
-    var base_code: u32 = 0;
-    var transient_code: u32 = 0;
-
-    const Rec = struct { experts: []u16, act_row: []u32, base: bool, live: u32, evals: usize, slot: []u32 = &.{} };
-
-    fn init(a: std.mem.Allocator) StreamRec {
-        return .{ .a = a };
-    }
-
-    fn deinit(self: *StreamRec, _: *TraceOps) void {
-        for (self.recs.items) |r| {
-            self.a.free(r.experts);
-            self.a.free(r.act_row);
-            self.a.free(r.slot);
-        }
-        self.recs.deinit(self.a);
-    }
-
-    pub fn finish(self: *StreamRec, _: *TraceOps) !void {
-        self.finishes += 1;
-    }
-};
-
-/// Decode-lane math that records each gateUp call's bank, the expert whose record each slot
-/// holds at the call (StreamRec's stream and bank) and the act rows (the act-row index is the
-/// host array made right before the call's `take`), in calls of <= 8 rows.
-const ColdRec = struct {
-    inner: TraceMath,
-    pub const max_decode_rows: u32 = 8;
-    var log: std.ArrayList(Call) = .empty;
-    const Call = struct { code: u32, experts: []u16, act_row: []u32, evals: usize };
-
-    pub fn gateUp(self: *const ColdRec, g: *TraceOps, x: u32, ids: u32, gate: ProjOf(u32), up: ProjOf(u32)) !u32 {
-        const slots = std.mem.bytesAsSlice(u32, @as([]align(4) const u8, @alignCast(g.hostBytesOf(ids) orelse return error.NoHostBytes)));
-        const acts = g.hostBytesOf(x - 1) orelse return error.NoHostBytes;
-        const s = StreamRec.stream.?;
-        const base = gate.code == StreamRec.base_code;
-        const experts = try g.gpa.alloc(u16, slots.len);
-        errdefer g.gpa.free(experts);
-        for (slots, experts) |slot, *e| e.* = try StreamRec.expertIn(s, StreamRec.bank.?, if (base) slot else s.layers[0].policy.capacity + slot);
-        try log.append(g.gpa, .{
-            .code = gate.code,
-            .experts = experts,
-            .act_row = try g.gpa.dupe(u32, std.mem.bytesAsSlice(u32, @as([]align(4) const u8, @alignCast(acts)))),
-            .evals = g.evals.items.len,
-        });
-        return self.inner.gateUp(g, x, ids, gate, up);
-    }
-
-    pub fn down(self: *const ColdRec, g: *TraceOps, h: u32, ids: u32, d: ProjOf(u32)) !u32 {
-        return self.inner.down(g, h, ids, d);
-    }
-};
-
-/// A wide route whose outputs carry, per row, its act row, slot and bank (host arrays the trace
-/// records): `callParts` hands them out in waves of 3 rows, last rows first.
-const EncRoute = struct {
-    const hidden = 64;
-
-    fn rowsOut(g: *TraceOps, a: std.mem.Allocator, rows: quant.PrefillRows, bank: BankArraysOf(u32), which: []const u32) !u32 {
-        const v = try a.alloc(f32, which.len * hidden);
-        defer a.free(v);
-        @memset(v, 0);
-        for (which, 0..) |i, r| {
-            v[r * hidden] = @floatFromInt(rows.act_row.?[i]);
-            v[r * hidden + 1] = @floatFromInt(rows.slot[i]);
-            v[r * hidden + 2] = @floatFromInt(bank.gate.code);
-        }
-        return g.hostArray(std.mem.sliceAsBytes(v), &.{ @intCast(which.len), hidden }, .float32);
-    }
-
-    pub fn callParts(_: *EncRoute, g: *TraceOps, _: u32, rows: quant.PrefillRows, bank: BankArraysOf(u32), alloc: std.mem.Allocator, outs: *std.ArrayList(u32), pos: *std.ArrayList(u32)) !void {
-        var end: usize = rows.slot.len;
-        while (end > 0) {
-            const start = end -| 3;
-            var which: [3]u32 = undefined;
-            for (start..end, 0..) |i, j| which[j] = @intCast(i);
-            try outs.append(alloc, try rowsOut(g, alloc, rows, bank, which[0 .. end - start]));
-            try pos.appendSlice(alloc, which[0 .. end - start]);
-            end = start;
-        }
-    }
-
-    pub fn finish(_: *EncRoute, _: *TraceOps) !void {}
-};
-
-/// A decode math whose outputs carry, per row, its slot row and the arrays it read (host arrays the trace records):
-/// the per-bank calls and the banked calls (packed ids) must hand every routed position the same words.
-const BankEnc = struct {
-    pub const has_banked = true;
-    const w = 4;
-
-    fn rowsOf(g: *TraceOps, x: u32) ![]const u32 {
-        const b = g.hostBytesOf(x) orelse return error.NoHostBytes;
-        return std.mem.bytesAsSlice(u32, @as([]align(4) const u8, @alignCast(b)));
-    }
-
-    fn floatsOf(g: *TraceOps, x: u32) ![]const f32 {
-        const b = g.hostBytesOf(x) orelse return error.NoHostBytes;
-        return std.mem.bytesAsSlice(f32, @as([]align(4) const u8, @alignCast(b)));
-    }
-
-    fn emit(g: *TraceOps, v: []const f32) !u32 {
-        return g.hostArray(std.mem.sliceAsBytes(v), &.{ @intCast(v.len / w), w }, .float32);
-    }
-
-    pub fn gateUp(_: *const BankEnc, g: *TraceOps, _: u32, ids: u32, gate: ProjOf(u32), up: ProjOf(u32)) !u32 {
-        var v: [max_route_ids * w]f32 = undefined;
-        const r = try rowsOf(g, ids);
-        for (r, 0..) |row, i| v[i * w ..][0..w].* = .{ @floatFromInt(row), @floatFromInt(gate.code), @floatFromInt(up.rin), 0 };
-        return emit(g, v[0 .. r.len * w]);
-    }
-
-    pub fn down(_: *const BankEnc, g: *TraceOps, h: u32, _: u32, d: ProjOf(u32)) !u32 {
-        var v: [max_route_ids * w]f32 = undefined;
-        const hv = try floatsOf(g, h);
-        @memcpy(v[0..hv.len], hv);
-        for (0..hv.len / w) |i| v[i * w + 3] = @floatFromInt(d.rout);
-        return emit(g, v[0..hv.len]);
-    }
-
-    pub fn gateUpBanked(_: *const BankEnc, g: *TraceOps, _: u32, ids: u32, banks: *const [n_banks]BankArraysOf(u32)) !u32 {
-        var v: [max_route_ids * w]f32 = undefined;
-        const r = try rowsOf(g, ids);
-        for (r, 0..) |p, i| {
-            const b = &banks[p >> 24];
-            v[i * w ..][0..w].* = .{ @floatFromInt(p & 0xFFFFFF), @floatFromInt(b.gate.code), @floatFromInt(b.up.rin), 0 };
-        }
-        return emit(g, v[0 .. r.len * w]);
-    }
-
-};
-
-/// TraceMath with the banked texts (DEVROUTE's structural test): shapes only.
-const TraceBankedMath = struct {
-    pub const has_banked = true;
-    inner: TraceMath,
-    pub fn gateUp(self: *const TraceBankedMath, g: *ops.TraceOps, x: u32, ids: u32, gate: ProjOf(u32), up: ProjOf(u32)) !u32 {
-        return self.inner.gateUp(g, x, ids, gate, up);
-    }
-    pub fn down(self: *const TraceBankedMath, g: *ops.TraceOps, h: u32, ids: u32, d: ProjOf(u32)) !u32 {
-        return self.inner.down(g, h, ids, d);
-    }
-    pub fn gateUpBanked(self: *const TraceBankedMath, g: *ops.TraceOps, x: u32, ids: u32, _: *const [n_banks]BankArraysOf(u32)) !u32 {
-        if (g.shapeOf(x).d[1] != self.inner.hidden or g.shapeOf(ids).d[0] != g.shapeOf(x).d[0]) return error.MathShape;
-        return g.kernel(&.{ g.shapeOf(x).d[0], self.inner.inter }, .float32);
-    }
-};
-
-/// One run of two decode calls under DEVROUTE and / or HOIST_FIRST (stack4's routed-path pair), recorded for comparison:
-/// the non-commit nodes, and per call the classes of the commits before the routing barrier's read (B the barrier's
-/// arrays, D the device hit wave, H the hoist) and the commits after the route.
-const DevHoistRun = struct {
-    ops: std.ArrayList(ops.Op) = .empty,
-    shapes: std.ArrayList(ops.Shape) = .empty,
-    pre: [2][8]u8 = undefined,
-    n_pre: [2]usize = .{ 0, 0 },
-    post_route: [2]usize = .{ 0, 0 },
-    hoist_after_read: [2]usize = .{ 0, 0 },
-    lut_ok: [2]bool = .{ false, false },
-    flipped: [2]bool = .{ false, false },
-    bound_dev: bool = false,
-    bound_hoist: bool = false,
-
-    fn deinit(r: *DevHoistRun, a: std.mem.Allocator) void {
-        r.ops.deinit(a);
-        r.shapes.deinit(a);
-    }
-
-};

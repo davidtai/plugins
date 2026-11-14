@@ -25,18 +25,14 @@ const settings = @import("settings.zig");
 const prompt_levers = @import("prompt_levers.zig");
 const profile = @import("../mimo/profile.zig");
 const gpu_warm = @import("../mimo/gpu_warm.zig");
-const ptl = @import("../mimo/prefill_timeline.zig");
-const route_trace = @import("../mimo/route_trace.zig");
 const log = sdk.log;
 
 const T = mlx.mlx_array;
 const Module = @This();
 
 pub const top_k: u32 = 8;
-/// Profile builds: the route trace over the bank's 288 experts (u16 ids, `GLM5_NEXT_ROUTE_TRACE`).
-pub const Trace = route_trace.TraceOf(u16, "glm5_next-route-trace-v2");
 /// The bridge over the NVFP4 bank: its {w, scales, global_scale} slot bindings, its read pool's 10 MiB staging.
-pub const B = bridge.For(exl3_bank, .{ .Arrays = exl3_bank.Arrays, .staging_bytes = settings.reader_staging_bytes, .Trace = Trace });
+pub const B = bridge.For(exl3_bank, .{ .Arrays = exl3_bank.Arrays, .staging_bytes = settings.reader_staging_bytes });
 pub const Stream = B.Stream;
 pub const StreamSource = B.StreamSource;
 /// turboexl3_glm53f: every routed layer's calls on turboexl3, at the layer's own rate (the plugin's src/routed_t3.zig).
@@ -298,7 +294,6 @@ pub fn SourceOf(comptime fam: Family) type {
 
         /// The prompt combine over the wide call's sources read in place (P7 `inplace`, the host's wired policy `max`).
         fn partsCombineInplace(self: *const Self, g: *ops.MlxOps, outs: []const T, loc: T, route_weights: T, nt: u32) !T {
-            if (comptime ptl.enabled) ptl.tile(.reduce, nt, 0, &.{});
             const encode_start = profile.now();
             const output = try self.combine_kernel.callInplace(g, outs, loc, route_weights, nt);
             profile.charge(.encode, encode_start);
@@ -311,7 +306,6 @@ pub fn SourceOf(comptime fam: Family) type {
         /// The same text over at most `prefill_combine.sources` bound sources (the scheduler merges the rest): under any other
         /// wired policy (the in-place form needs every source in MLX's residency sets).
         fn partsCombineFused(self: *const Self, g: *ops.MlxOps, outs: []const T, loc: T, route_weights: T, nt: u32) !T {
-            if (comptime ptl.enabled) ptl.tile(.reduce, nt, 0, &.{});
             const encode_start = profile.now();
             const output = try self.combine_kernel.call(g, outs, loc, route_weights, nt);
             profile.charge(.encode, encode_start);
@@ -617,7 +611,6 @@ pub fn SourceOf(comptime fam: Family) type {
             const hook = self.ex.at(layer);
             const parts = try hook.routedParts(g, x, try g.astype(expert_ids, .int32));
             defer hook.releaseParts(g);
-            if (comptime ptl.enabled) ptl.stage(.join);
             const join_start = profile.now();
             // The tiles are evaluated; this evaluates the merged source, if any.
             try g.evalAll(parts.outs);
