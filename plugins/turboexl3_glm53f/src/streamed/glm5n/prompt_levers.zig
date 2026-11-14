@@ -49,5 +49,3 @@ pub const Settings = struct {
     malformed: struct { wave_rows: bool = false, route_cut: bool = false, static_order: bool = false, ttft_tail: bool = false } = .{},
 
 };
-
-const testing = std.testing;

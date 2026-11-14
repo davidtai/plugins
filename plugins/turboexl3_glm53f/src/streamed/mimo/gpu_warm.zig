@@ -417,7 +417,3 @@ pub const Trace = struct {
     fail_at: u64 = 0,
 
 };
-
-// ── CPU proofs (no device, no lock) ──
-
-const testing = std.testing;

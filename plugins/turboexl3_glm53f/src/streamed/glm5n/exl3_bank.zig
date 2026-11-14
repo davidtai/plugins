@@ -241,23 +241,3 @@ pub fn checkArrays(g: anytype, which: []const u8, p: Arrays(@TypeOf(g.*).T), dow
         return error.Glm5NextSlotArrays;
     }
 }
-
-// ── Tests ──
-
-const testing = std.testing;
-
-/// A synthetic two-layer, eight-expert bank at GLM's expert shape (DeepSeek's writer at hidden 4096 / inter 2048),
-/// its v2 manifest completed (`fullQuantization`).
-const Synth = struct {
-    tmp: testing.TmpDir,
-    root: []const u8,
-    rbuf: [512]u8,
-    /// The bank's experts.bin as written (`Stream.expectServed`'s image).
-    image: []u8,
-
-    fn close(self: *Synth) void {
-        testing.allocator.free(self.image);
-        self.tmp.cleanup();
-        testing.allocator.destroy(self);
-    }
-};

@@ -1,36 +1,10 @@
-//! MiMo's six-component MXFP4 bank on the shared SDK stream. The SDK owns
-//! residency, asynchronous reads, windows, pinning and release; this bridge
-//! maps absolute model layers and exposes GatherQmm's {w, scales} bindings.
-const std = @import("std");
-const env = @import("mlx_host").env;
-const sdk_ext = @import("../sdk_ext.zig");
-const mlx = @import("sdk").mlx;
-const bank_mod = @import("bank.zig");
-const expert_policy = sdk_ext.expert.policy;
-const profile = @import("profile.zig");
-const gpu_warm = @import("gpu_warm.zig");
-/// MiMo's bridge over the shared SDK stream (`stream_source.For`): its bank module, GatherQmm's {w, scales} slot bindings
-/// and its read pool's staging.
-const Mimo = @import("stream_source.zig").For(bank_mod, .{ .Arrays = sdk_ext.quant.GatherQmm.Arrays, .staging_bytes = io_staging_bytes });
-const S = Mimo.S;
-pub const Stream = Mimo.Stream;
-pub const Options = Mimo.Options;
-pub const SlotMemory = Mimo.SlotMemory;
-pub const LayerSlotBank = Mimo.LayerSlotBank;
-pub const Route = Mimo.Route;
-pub const Part = Mimo.Part;
-pub const BankKind = Mimo.BankKind;
-pub const SlotRef = Mimo.SlotRef;
-pub const Error = Mimo.Error;
-pub const Stats = Mimo.Stats;
-pub const Gates = Mimo.Gates;
-pub const max_route_ids = Mimo.max_route_ids;
-pub const uses_reader = Mimo.uses_reader;
-pub const BankArrays = bank_mod.BankArrays;
-pub const BankArraysOf = bank_mod.BankArraysOf;
+//! The shared SDK stream's construction constants (the read pool, the prefill windows, decode's window 0) and the
+//! prompt pass's read schedules, which `stream_source.For` and GLM-5.3-Flash's experts build their stream with.
+const expert_policy = @import("../sdk_ext.zig").expert.policy;
+/// The SDK route's widest id count (48).
+pub const max_route_ids = expert_policy.max_route_ids;
 
 pub const io_workers: u32 = 4;
-pub const io_staging_bytes: u64 = 9 << 20;
 /// P1's read-ahead admits min(rows, (tickets - 2 * max_items) / 2) records (`Stream.readAheadSeed`): 512 covers
 /// every MiMo row a layer can hold (248 >= 124 at the fill; 256 tickets admitted only 120).
 pub const io_tickets: u32 = 512;
@@ -54,9 +28,6 @@ pub fn decodeRouteIds(window: DecodeWindow) u32 {
         .route, .invalid => max_route_ids,
     };
 }
-pub const lookahead = Mimo.lookahead;
-
-pub const options = Mimo.options;
 
 /// P7 (`settings.prefill_read_schedule`): the prompt pass's read schedule, fixed at construction. `current` (the control):
 /// the stream's stock schedule. `early`: the stream's `overlap` schedule (`S.PromptReads`): every group of a prompt call
@@ -105,102 +76,3 @@ pub const AutoSchedule = struct {
 /// The `early` schedule's ticket ring: its posts run up to the read-ahead (<= 248 records) plus a whole call's loads
 /// (<= 256) ahead of their consumers, 2 tickets each; the stock ring (`io_tickets`) is sized for one group's.
 pub const io_tickets_early: u32 = 2048;
-
-pub const applyReadSchedule = Mimo.applyReadSchedule;
-
-const aheadPost = Mimo.aheadPost;
-
-pub const eventOptions = Mimo.eventOptions;
-
-const wavesOf = Mimo.wavesOf;
-
-pub const traceBank = Mimo.traceBank;
-
-pub const StreamSource = Mimo.StreamSource;
-
-// ── HITPASS CPU tests: a host-memory MiMo stream (layer 0 dense, two routed layers, 64 experts, 4 rows each) over a
-// tmp sidecar; pool pread workers and host slot rows only. No MLX array, device or lock. ──
-
-const HitFixture = struct {
-    const geom_args = .{ 32, 32, 64, 1, 2 };
-    bytes: []u8,
-    side: bank_mod.TestSidecar,
-    stream: *Stream,
-
-    /// In place: the stream retains `&f.side.bank`, the SDK bank `&f.side.owner`.
-    fn init(f: *HitFixture, a: std.mem.Allocator, rows: []const u32) !void {
-        return f.initOpts(a, options(rows, .host));
-    }
-
-    fn deinit(f: *HitFixture, a: std.mem.Allocator) void {
-        f.stream.deinit();
-        f.side.deinit();
-        a.free(f.bytes);
-    }
-};
-
-// ── P7 read schedule CPU proofs (host stream over the HitFixture's sidecar: two routed layers, 64 experts; pool pread
-// workers, host rows; no MLX array, device or lock). The executor's depth-2 wide sequence is emulated: read-ahead, the
-// executor's await, seed, hot order, groups 0-1 routed, then per group its reads landed, every routed expert's row
-// checked against the sidecar, released, group + 2 routed. ──
-
-/// The first P7 proof's 40 calls (seeded 0x7e7a11, rows 28): calls alternate layers 1 and 2, expert spans cycle over
-/// 24..44 (3-4 groups of 11, under the fixture's 64); the read-ahead's ranking is the call's true hot order with
-/// neighbours swapped, then (odd calls) a few cold experts pulled into the admitted ranks, head or tail (mispredictions:
-/// drops, read-ahead rows evicted, seed misses).
-const P7Calls40 = struct {
-    const n_calls = 40;
-    ids_store: [n_calls][64 * 8]u16 = undefined,
-    pred_store: [n_calls][64]u16 = undefined,
-    ids: [n_calls][]const u16 = undefined,
-    pred: [n_calls][]const u16 = undefined,
-
-};
-
-// ── X20 (mimo/sched-auto) CPU proofs: `prefill_read_schedule: auto` on the same host stream fixture. ──
-
-/// The scheduler's math on the trace backend: MiMo's projection type, the banked waves' shapes only.
-const HitTraceMath = struct {
-    pub const has_banked = true;
-    pub const decode_forward_rows: u32 = 1;
-    pub fn Projection(comptime A: type) type {
-        return sdk_ext.quant.GatherQmm.Arrays(A);
-    }
-    hidden: c_int,
-    inter: c_int,
-    const Tr = @import("../ops.zig").TraceOps;
-    pub fn gateUp(self: *const HitTraceMath, g: *Tr, x: u32, _: u32, _: Projection(u32), _: Projection(u32)) !u32 {
-        return g.kernel(&.{ g.shapeOf(x).d[0], self.inter }, .bfloat16);
-    }
-    pub fn down(self: *const HitTraceMath, g: *Tr, h: u32, _: u32, _: Projection(u32)) !u32 {
-        return g.kernel(&.{ g.shapeOf(h).d[0], self.hidden }, .bfloat16);
-    }
-    pub fn gateUpBanked(self: *const HitTraceMath, g: *Tr, x: u32, ids: u32, _: anytype) !u32 {
-        if (g.shapeOf(ids).d[0] != g.shapeOf(x).d[0]) return error.MathShape;
-        return g.kernel(&.{ g.shapeOf(x).d[0], self.inter }, .bfloat16);
-    }
-};
-
-const HitScript = struct {
-    calls: []const []const u16,
-    next: usize = 0,
-    fn values(self: *HitScript) HitTraceMath.Tr.HostValues {
-        return .{ .ctx = self, .ids = ids, .argmax = argmax };
-    }
-    fn ids(ctx: *anyopaque, out: []u16) anyerror!void {
-        const self: *HitScript = @ptrCast(@alignCast(ctx));
-        if (self.next >= self.calls.len) return error.ScriptExhausted;
-        const c = self.calls[self.next];
-        self.next += 1;
-        if (c.len != out.len) return error.ScriptShape;
-        @memcpy(out, c);
-    }
-    fn argmax(_: *anyopaque) anyerror!u32 {
-        return error.NoPicks;
-    }
-};
-
-// ── end HITPASS CPU tests ──
-
-// Host-memory stream (two routed layers, 64 experts, 4 rows): the prompt pass routes each layer's experts in the
-// installed hot order, so decode starts with exactly the installed seed. CPU only: host slot rows and pread workers.

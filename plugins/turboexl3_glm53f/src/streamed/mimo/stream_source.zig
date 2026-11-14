@@ -1,9 +1,8 @@
 //! The shared SDK stream's source bridge over any bank module (`For`): the stream built from the arch's rows and the
 //! construction routes (the read pool, the event gates, the lookahead, P7's read schedule), and the `StreamSource` the
 //! shared DeepSeek scheduler (`deepseek_v41_experts.ExpertsWith`) runs over: absolute model layers, the route ring's calls,
-//! the read schedule's routes and the bank's slot bindings. MiMo's instance is stream.zig's (its MXFP4 bank, GatherQmm's
-//! {w, scales}); GLM-5.3-Flash's is glm5_next/experts.zig's (its NVFP4 bank, {w, scales, global_scale}). The code below
-//! is MiMo's bridge as it was, parameterized by the bank module and its projection arrays.
+//! the read schedule's routes and the bank's slot bindings. GLM-5.3-Flash's instance is glm5n/experts.zig's, over its
+//! EXL3 bank.
 const std = @import("std");
 const sdk_ext = @import("../sdk_ext.zig");
 const mlx = @import("sdk").mlx;

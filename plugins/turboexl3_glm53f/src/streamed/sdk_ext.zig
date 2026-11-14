@@ -12,7 +12,7 @@ pub const expert = @import("mlx_serve").streamed.expert;
 pub const kernels = @import("sdk_ext/kernels.zig");
 /// Every MLX custom kernel's launch through the plugin's launch cache (no per-call source rebuild and hash).
 pub const metal_launch = @import("sdk_ext/metal_launch.zig");
-/// C2: the routed-expert quant contract and the generic gather quant (`GatherQmm` through `FromGatherMatmul`).
+/// C2: the routed-expert quant contract.
 pub const quant = @import("sdk_ext/quant.zig");
 /// G7: profile probes, injected by the arch's backend type (`of(Backend)`); off everywhere else.
 pub const profile = @import("sdk_ext/profile.zig");

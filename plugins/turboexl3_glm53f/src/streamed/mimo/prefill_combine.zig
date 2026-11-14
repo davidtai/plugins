@@ -22,7 +22,6 @@ const mlx = @import("sdk").mlx;
 /// MLX custom kernels through the plugin's launch cache (sdk_ext/metal_launch.zig).
 const mtl = @import("../sdk_ext/metal_launch.zig");
 const ops = @import("../ops.zig");
-const bank_mod = @import("bank.zig");
 
 const T = mlx.mlx_array;
 
@@ -234,9 +233,3 @@ const Fixture = struct {
         if (f.w_arr.ctx != null) g.release(f.w_arr);
     }
 };
-
-// ── CPU tests ──
-
-const testing = std.testing;
-
-const shaHex = @import("../sdk_ext/kernel_set.zig").shaHex;
