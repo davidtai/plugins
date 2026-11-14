@@ -67,7 +67,7 @@ fn open(ctx: *abi.LoadCtx) callconv(.c) Verdict {
     log.use(h);
     if (!tkit.nax.available()) return no_nax;
     // turboexl3's configuration as the served stack sets it (src/ling_math.zig `configure`): the banked decode's grouped
-    // texts on t4, the one-row table, the fused routed finish (PF_DFIN), the router's rows launch.
+    // texts on t4, the one-row table, the fused routed finish (PF_DFIN).
     ling_math.configure() catch |e| return Verdict.named(.failed, @errorName(e));
     return .ok;
 }

@@ -21,13 +21,6 @@ pub fn install(raw: ?*const anyopaque) bool {
     return true;
 }
 
-/// Bytes the plugin may still allocate on the GPU (`Host.memory_ceiling`: the host's ceiling less what is resident);
-/// no limit with no table kept.
-pub fn memoryCeiling() u64 {
-    const t = table orelse return std.math.maxInt(u64);
-    return t.memory_ceiling(t.ctx);
-}
-
 fn gpu() ?*const host.HostGpu {
     const t = table orelse return null;
     return t.gpu;

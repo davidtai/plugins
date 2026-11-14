@@ -25,7 +25,3 @@ pub fn info(comptime fmt: []const u8, args: anytype) void {
 pub fn headroom() ?u64 {
     return if (host) |h| h.memoryCeiling() else null;
 }
-
-pub fn debug(comptime fmt: []const u8, args: anytype) void {
-    if (host) |h| h.log(.debug, fmt, args);
-}

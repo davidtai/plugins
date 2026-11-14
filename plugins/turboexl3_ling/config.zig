@@ -27,19 +27,18 @@ pub fn codebookOf(block_json: []const u8) ?Codebook {
 }
 
 /// What the bank reads from the model's config beside the host's `BankGeometry`: the dense layers before the first
-/// routed one (bank layer = model layer - `first`), the router's groups (the read-ahead's predictor picks by them),
-/// and the trunk's layer count the clamp lists are read against.
-pub const Ling = struct { first: u32, n_group: u32, topk_group: u32, layers: u32 };
+/// routed one (bank layer = model layer - `first`) and the trunk's layer count the clamp lists are read against.
+pub const Ling = struct { first: u32, layers: u32 };
 
 /// `config_json` as a Ling pack this plugin reads (null: another model, or a field out of range).
 pub fn lingOf(config_json: []const u8) ?Ling {
     var buf: [1 << 16]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const S = struct { model_type: []const u8 = "", first_k_dense_replace: u32 = 0, n_group: u32 = 0, topk_group: u32 = 0, num_hidden_layers: u32 = 0 };
+    const S = struct { model_type: []const u8 = "", first_k_dense_replace: u32 = 0, num_hidden_layers: u32 = 0 };
     const c = std.json.parseFromSliceLeaky(S, fba.allocator(), config_json, .{ .ignore_unknown_fields = true }) catch return null;
     if (!std.mem.eql(u8, c.model_type, "bailing_hybrid")) return null;
     if (c.num_hidden_layers == 0 or c.num_hidden_layers > clamps.max_layers or c.first_k_dense_replace >= c.num_hidden_layers) return null;
-    return .{ .first = c.first_k_dense_replace, .n_group = c.n_group, .topk_group = c.topk_group, .layers = c.num_hidden_layers };
+    return .{ .first = c.first_k_dense_replace, .layers = c.num_hidden_layers };
 }
 
 pub fn claims(block_json: abi.Str, config_json: abi.Str) callconv(.c) abi.Claim {
@@ -96,9 +95,9 @@ test "turboexl3_ling config: claims exllamav3's block on a Ling pack only, by ma
     try testing.expectEqual(abi.Claim.no, claims(.of("{"), .of(ling31)));
 }
 
-test "turboexl3_ling config: Ling-3.1-flash's bank geometry beside the host's: 4 dense layers, 8 groups of which 4 route" {
+test "turboexl3_ling config: Ling-3.1-flash's bank geometry beside the host's: 4 dense layers of 72" {
     const l = lingOf(ling31).?;
-    try testing.expectEqual(Ling{ .first = 4, .n_group = 8, .topk_group = 4, .layers = 72 }, l);
+    try testing.expectEqual(Ling{ .first = 4, .layers = 72 }, l);
     try testing.expect(lingOf("{\"model_type\":\"bailing_hybrid\",\"num_hidden_layers\":4,\"first_k_dense_replace\":4}") == null);
 }
 

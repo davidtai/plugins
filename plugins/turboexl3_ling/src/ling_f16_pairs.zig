@@ -1,5 +1,5 @@
 //! turboexl3_ling's routed prompt pairs in f16 (PF_F16_PAIRS): each chunk of a wide (prompt) routed call on the rows
-//! path (src/ling_math.zig `rowsCall`) stores its pairs' rows as f16 in place of f32, through turboexl3's
+//! path (src/ling_bank.zig `runRows`) stores its pairs' rows as f16 in place of f32, through turboexl3's
 //! `ling.moeLingRowsPairsF16`. Exact: a chunk is a top-1 call at weight 1 (each pair) or +0 (each pad row of a padded
 //! call), so the chain's finish stores `0 + w * float(h)`, an f16 value, in every word; the f16 store holds that value,
 //! and every reader widens it back exactly: the combine (src/ling_combine.zig, turboexl3's `combineParts` over f16
@@ -10,7 +10,7 @@
 const mlx = @import("mlx_serve").mlx;
 const t3 = @import("turboexl3");
 
-/// A rows-path call's weights on the host (src/ling_math.zig `rowsCall`'s, which it hands turboexl3 as an array): 1 for
+/// A rows-path call's weights on the host (src/ling_bank.zig `runRows`'s, which it hands turboexl3 as an array): 1 for
 /// each of `rows` pairs; a call of `rows` <= 16 pairs (`small`) padded to `padded` row-slots with +0 for each pad row.
 /// `buf` holds at least `padded` (small) or `rows` values.
 pub fn weightsInto(buf: []f32, rows: usize, small: bool, padded: usize) []const f32 {

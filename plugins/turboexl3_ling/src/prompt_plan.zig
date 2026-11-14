@@ -41,8 +41,7 @@ const testing = std.testing;
 
 /// What one pair's math sees in a plan: the bank call's other pairs of its expert, in order (the pair's own place
 /// among them included). A residency-invariant plan gives every pair the same view whatever bank its expert sits in.
-fn viewsOf(a: std.mem.Allocator, ids: []const u16, k: usize, n_experts: usize, group_size: usize, bank_of_expert: []const u8, plan: anytype) ![][]u32 {
-    _ = k;
+fn viewsOf(a: std.mem.Allocator, ids: []const u16, n_experts: usize, group_size: usize, bank_of_expert: []const u8, plan: anytype) ![][]u32 {
     const first = try a.alloc(u32, n_experts + 1);
     defer a.free(first);
     const order = try a.alloc(u32, ids.len);
@@ -102,7 +101,7 @@ fn expectSameViews(a: std.mem.Allocator, ids: []const u16, plan: anytype) !void 
     const all_base = try a.alloc(u8, n_experts);
     defer a.free(all_base);
     @memset(all_base, 0);
-    const base = try viewsOf(a, ids, 4, n_experts, 12, all_base, plan);
+    const base = try viewsOf(a, ids, n_experts, 12, all_base, plan);
     defer freeViews(a, base);
     var prng = std.Random.DefaultPrng.init(7);
     for (0..8) |_| {
@@ -110,7 +109,7 @@ fn expectSameViews(a: std.mem.Allocator, ids: []const u16, plan: anytype) !void 
         const split = try a.alloc(u8, n_experts);
         defer a.free(split);
         for (split) |*b| b.* = @intCast(prng.random().uintLessThan(u8, 3));
-        const got = try viewsOf(a, ids, 4, n_experts, 12, split, plan);
+        const got = try viewsOf(a, ids, n_experts, 12, split, plan);
         defer freeViews(a, got);
         for (base, got) |x, y| try testing.expectEqualSlices(u32, x, y);
     }

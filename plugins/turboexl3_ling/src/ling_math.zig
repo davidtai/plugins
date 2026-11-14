@@ -1,9 +1,8 @@
 //! Ling-3.1-flash's routed math settings on turboexl3, for the bank (src/ling_bank.zig): turboexl3's configuration as
-//! this plugin serves it (`configure`), PF_DFIN's whole-call choice over the model's routing (`dfinTakes`, its counts),
-//! and the prompt calls' padding (`gemm_min_rows`: a call of 16 pairs or fewer is padded to 17 so every prompt pair takes
+//! this plugin serves it (`configure`), PF_DFIN's whole-call choice over the model's routing (`dfinTakes`), and the
+//! prompt calls' padding (`gemm_min_rows`: a call of 16 pairs or fewer is padded to 17 so every prompt pair takes
 //! turboexl3's prefill GEMM, whose words do not depend on how the bank's residency split the call).
 
-const std = @import("std");
 const t3 = @import("turboexl3");
 const switches = @import("ling_switches.zig");
 
@@ -18,21 +17,6 @@ pub fn dfinTakes(rows: usize) bool {
     return switches.dfinCallTakes(@intCast(rows), routing.topk, routing.experts, switches.dfin_call_min);
 }
 
-/// PF_DFIN's counts since load (src/ling_switches.zig `DfinCalls`): each turboexl3 routed call it chose an ending for
-/// by side and ending.
-var dfin_counts: switches.DfinCalls = .{};
-
-/// A routed call PF_DFIN chose an ending for (src/ling_bank.zig: each rows-path call of a prompt call).
-pub fn countCall(side: switches.DfinSide, fused: bool) void {
-    dfin_counts.count(side, fused);
-}
-
-/// The counts line (`DfinCalls.line`), after a prompt forward and every 64 decode steps.
-pub fn logDfinCalls(at: switches.DfinAt) void {
-    var buf: [512]u8 = undefined;
-    std.log.info("{s}", .{dfin_counts.line(&buf, at, switches.dfin_call_min)});
-}
-
 /// The fewest pairs a prompt call takes to `moeLing`: turboexl3 runs 16 rows or fewer on its decode kernels and more on
 /// its prefill GEMM, which agree within tolerance, not byte for byte; a smaller call is padded to this many.
 pub const gemm_min_rows = 17;
@@ -41,10 +25,9 @@ comptime {
     if (gemm_min_rows != t3.kernels.DECODE_ROWS_MAX + 1) @compileError("gemm_min_rows must be turboexl3's DECODE_ROWS_MAX + 1");
 }
 
-/// At load, before any turboexl3 launch is built (plugin.zig `open`, and again at the bank's open, ling_source.zig):
+/// At load, before any turboexl3 launch is built (plugin.zig `open`, and again at the bank's open, src/ling_bank.zig):
 /// turboexl3's configuration for the calls this plugin makes (the trunk's linears, the routed experts), each field the
-/// served stack sets. The MLA and router fields were the model plugin's forward's; every other field keeps turboexl3's
-/// default.
+/// served stack sets; every other field keeps turboexl3's default.
 pub fn configure() error{InvalidTurboexl3Config}!void {
     var c = t3.config.get().*;
     // The banked decode on turboexl3's grouped texts, as turboexl3_ds41 serves it: up to four row-slots of one expert a

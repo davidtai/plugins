@@ -1,5 +1,5 @@
-//! turboexl3_ling's routed prompt rows (ROWS_PATH, exact): each chunk of a wide (prompt) routed call (src/ling_math.zig
-//! `chunks()`) runs turboexl3's prompt call over gathered rows (`moeLingRows`) in place of the chunk's take, its cast to
+//! turboexl3_ling's routed prompt rows (ROWS_PATH, exact): each chunk of a wide (prompt) routed call (src/ling_bank.zig
+//! `runRows`) runs turboexl3's prompt call over gathered rows (`moeLingRows`) in place of the chunk's take, its cast to
 //! f32 and `moeLing` at top-1: the chunk's act rows are the row map the chain's prepare reads the call's x through, so
 //! the gathered bf16 copy, the f32 copy and the prepare's f32 read become one bf16 read in the prepare. The prepare
 //! rounds each x value to f16 through f32 whatever x's dtype, and the finish stores the one f32 sum, so every row's bytes

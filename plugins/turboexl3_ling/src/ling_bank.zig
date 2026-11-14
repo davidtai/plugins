@@ -369,7 +369,6 @@ pub const Source = struct {
                 if (m == 0) continue;
                 const src = sources.items.len;
                 const y = try runRows(s, xb, banks[bk], pair_rows, pair_inds, weights, m, self.limits[bl], dfin);
-                ling_math.countCall(.wide, dfin);
                 try mlx.check(mlx.mlx_array_eval(y));
                 try sources.append(a, y);
                 for (pair_at[0..m], 0..) |p, row| {
@@ -480,10 +479,6 @@ pub const Source = struct {
     pub fn settle(self: *Source) !void {
         try self.stream.flush();
         if (self.phase == .decode and self.planDecode(self.grown, .trim).verdict == .refuse) return error.LingDecodeUnderBase;
-    }
-
-    pub fn stats(self: *Source) expert.Stats {
-        return self.stream.stats();
     }
 };
 
