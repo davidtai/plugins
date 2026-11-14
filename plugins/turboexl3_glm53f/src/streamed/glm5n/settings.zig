@@ -25,9 +25,6 @@ pub const Exl3Forms = struct {
     gateup: Exl3GateUpForm = .guone,
     down: Exl3DownForm = .pair,
 
-    /// The seam chain, by name (`"exl3_gateup_form":"seam","exl3_down_form":"seam"`): the control.
-    pub const seam_chain: Exl3Forms = .{ .gateup = .seam, .down = .seam };
-
     /// The forms exl3_forms.zig installs for these settings (every name maps).
     pub fn forms(f: Exl3Forms) exl3_forms.Forms {
         return .{

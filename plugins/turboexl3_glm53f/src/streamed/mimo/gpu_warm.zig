@@ -63,7 +63,6 @@ const c = if (builtin.os.tag == .macos) struct {
     extern fn mimo_warm_commit(h: ?*anyopaque, iters: u32, cb: *?*anyopaque) c_int;
     extern fn mimo_warm_retire(cb: ?*anyopaque, gpu_start: *f64, gpu_end: *f64) c_int;
     extern fn mimo_warm_event_value(event: u64) u64;
-    extern fn mimo_warm_now_ns() u64;
     extern fn mimo_warm_last_error() [*:0]const u8;
 } else struct {
     fn mimo_warm_destroy(_: ?*anyopaque) void {}
@@ -397,23 +396,3 @@ pub fn install(a: std.mem.Allocator, route: Route, stream: mlx.mlx_stream, event
     errdefer backend.deinit();
     return Warm.create(a, backend, .{});
 }
-
-// ── the trace backend (CPU proofs): chunks are log entries; a retire sleeps the chunk's emulated GPU time ──
-
-pub const Trace = struct {
-    pub const Chunk = struct { id: u64, iters: u32 };
-    /// The test's record (it outlives the engine): commits and retires.
-    pub const Log = struct {
-        commits: std.atomic.Value(u64) = .init(0),
-        retired: std.atomic.Value(u64) = .init(0),
-    };
-    /// The event value the warm loop reads (a test word, or the stream's host event word).
-    value_fn: *const fn (?*const anyopaque) u64,
-    ctx: ?*const anyopaque,
-    log: *Log,
-    /// The emulated GPU time of a chunk: iters x ns_per_iter.
-    ns_per_iter: u64 = 2,
-    /// A commit that fails (`fail_at` > 0: the commit with that number).
-    fail_at: u64 = 0,
-
-};

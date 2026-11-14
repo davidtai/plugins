@@ -89,8 +89,8 @@ fn seamOf(name: []const u8) ?bool {
 }
 
 /// The switches the served configuration keeps off ("0", or "" for a text switch): PF_INT8 (not exact; a server-start
-/// option, 1 to 4), LOGITS_DUMP (a check, never served), PF_RUN_TRIM and DEMAND_HELP (exact, but their A/Bs
-/// rejected them; DEMAND_HELP on the kit stream's `demandFirst(2)` decoded 3.1% slower in g53g2h1).
+/// option, 1 to 4) and DEMAND_HELP (exact, but its A/B rejected it: on the kit stream's `demandFirst(2)` it decoded
+/// 3.1% slower in g53g2h1).
 const off = [_][]const u8{
     "TURBOEXL3_GLM53F_PF_INT8",
     "TURBOEXL3_GLM53F_DEMAND_HELP",

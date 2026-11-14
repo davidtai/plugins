@@ -22,7 +22,3 @@ pub inline fn charge(bucket: Bucket, start: Stamp) void {
 pub inline fn call() void {
     if (comptime enabled) calls += 1;
 }
-
-fn seconds(bucket: Bucket) f64 {
-    return @as(f64, @floatFromInt(ns[@backingInt(bucket)])) / std.time.ns_per_s;
-}

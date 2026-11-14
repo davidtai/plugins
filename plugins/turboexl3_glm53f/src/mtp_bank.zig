@@ -116,13 +116,6 @@ pub const Manifest = struct {
     pub fn offsetOf(m: *const Manifest, e: u32, c: usize) u64 {
         return m.base_offset + @as(u64, e) * m.geometry.record_bytes + m.geometry.segments[c].offset;
     }
-
-    /// The bytes the resident bank holds.
-    pub fn residentBytes(m: *const Manifest) u64 {
-        var n: u64 = 0;
-        for (m.geometry.segments) |s| n += s.length;
-        return n * m.n_experts;
-    }
 };
 
 /// One projection's three arrays (component order: code, rout = svh, rin = suh), each a new reference the caller owns.

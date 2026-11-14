@@ -438,14 +438,6 @@ pub fn For(comptime bank_mod: type, comptime params: Params) type {
                 return k;
             }
 
-            pub fn isResident(self: *const StreamSource, layer: u32, expert: u16) bool {
-                return self.stream.layers[self.relativeLayer(layer)].policy.slotOf(expert) != null;
-            }
-
-            pub fn readWallNs(self: *StreamSource) u64 {
-                return @intCast(@max(self.stream.pool.readGauge()[4], 0));
-            }
-
             pub fn gate(self: *StreamSource, call: *Call) Error!?Gates {
                 const gates = try self.stream.gate(call.route.?);
                 // X12 (`gpu_keep_warm: "waits"` / `"all"`): the call's gated parts (decode miss parts, a prompt group's reads)

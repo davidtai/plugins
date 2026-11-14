@@ -27,19 +27,6 @@ pub const env = @import("src/host/env.zig");
 pub const shared = @import("src/host/shared.zig");
 pub const quant_abi = abi;
 pub const routed_t3 = @import("src/routed_t3.zig");
-/// The model's levers on the bank's calls: the one-launch combine and the route view are not in the kit.
-pub const moe_combine1 = struct {
-    pub const on = false;
-    pub fn combine(_: mlx.mlx_stream, _: mlx.mlx_array, _: mlx.mlx_array, _: mlx.mlx_array) !?mlx.mlx_array {
-        return null;
-    }
-};
-pub const route_view = struct {
-    pub fn view(_: mlx.mlx_stream, _: mlx.mlx_array) !?mlx.mlx_array {
-        return null;
-    }
-};
-pub const mtp_acceptance = struct {};
 
 /// Shown at install and in Settings.
 pub const version = "0.4.0";

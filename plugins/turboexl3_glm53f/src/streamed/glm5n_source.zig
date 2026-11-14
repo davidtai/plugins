@@ -68,9 +68,6 @@ pub fn setPromptKeep(on: bool) void {
 pub fn setSpecPick1(on: bool) void {
     experts.spec_pick1 = on;
 }
-pub const reader_staging_bytes: u64 = settings.reader_staging_bytes;
-/// turboexl3_glm53f: the pieces of a decode call's lone gate/up span at a read pool's workers, for the plugin's load line.
-pub const demandSplitPieces = experts.demandSplitPieces;
 /// turboexl3_glm53f: `TURBOEXL3_GLM53F_DEMAND_HELP`, the decode phase's demand-first mode (0 off, or 2) for the next
 /// `Source.open` (`experts.demand_first`).
 pub fn setDemandFirst(mode: u32) void {

@@ -9,9 +9,6 @@ const profile = @import("profile.zig");
 
 const T = mlx.mlx_array;
 
-/// A prompt wave's rows at most on the control (MiMo's projection tile).
-pub const projection_rows: u32 = 1024;
-
 pub const Profile = struct {
     pub const enabled = profile.enabled;
     pub const now = profile.now;

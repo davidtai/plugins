@@ -90,14 +90,12 @@ pub fn billedByLayer(p: Plan, decode_rows: []const u32, layer_bytes: []const u64
     return .{ .prompt = @as(u64, p.prompt) * sum + @as(u64, transient) * (widest + alt), .decode = decode };
 }
 
-/// The decode lookahead's records read ahead a layer call (`mimo/stream_source.zig` `lookahead.budget`); plugin.zig
-/// checks it against the streamer at compile time.
+/// The decode lookahead's records read ahead a layer call (`mimo/stream_source.zig` `lookahead.budget`), for
+/// SPEC_PICK1's load line.
 pub const streamer_spec_budget: u32 = 2;
 
-/// The read pool's workers (`mimo/stream.zig` `io_workers`) and each worker's staging buffer (`glm5n/settings.zig`
-/// `reader_staging_bytes`); plugin.zig checks both against the streamer at compile time.
+/// The read pool's workers (`mimo/stream.zig` `io_workers`), for ADOPT_PIECES's load line.
 pub const streamer_io_workers: u32 = 4;
-pub const streamer_reader_staging_bytes: u64 = 16 << 20;
 
 /// The bank's switches, read at its open (`parseSwitch`).
 pub const Switches = struct {

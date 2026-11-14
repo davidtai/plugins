@@ -147,8 +147,3 @@ GLM53F_WARM_HIDDEN uint64_t mimo_warm_event_value(uint64_t event) {
   id<MTLSharedEvent> ev = (__bridge id<MTLSharedEvent>)(void*)(uintptr_t)event;
   return ev.signaledValue;
 }
-
-// The host clock Metal's GPU timestamps use (mach-absolute, ns).
-GLM53F_WARM_HIDDEN uint64_t mimo_warm_now_ns(void) {
-  return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-}

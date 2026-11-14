@@ -925,12 +925,6 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
         /// barrier, the residents' wave, then per miss part gate/up after
         /// `waitGu` and down after `waitDown`, each wave started on the GPU;
         /// release; the outputs in the router's order, `[n, k, hidden]` f32.
-        /// A residency query over the source (before the call's route admits and evicts; profile builds).
-        const ResidentAt = struct {
-            src: *S,
-            layer: u32,
-        };
-
         pub fn run(self: *Self, g: *G, layer: u32, xf: T, indices: T, hoist: []const T) !T {
             return self.runEnd(g, layer, xf, indices, hoist, .take);
         }

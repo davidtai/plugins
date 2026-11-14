@@ -53,8 +53,6 @@ const std = @import("std");
 const mlx = @import("mlx_serve").mlx;
 const t3 = @import("turboexl3");
 const log = @import("host/log.zig");
-/// TURBOEXL3_GLM53F_PF_MOE_HOLD: a prompt call's start hands a DSA layer's hold back to MLX's cache (src/pf_reuse.zig).
-const pf_reuse = @import("pf_reuse.zig");
 const options = @import("options.zig");
 
 /// The rows a slot bank's scale array is sliced to for turboexl3: its code array's rows when the scale array holds more
@@ -867,12 +865,6 @@ pub fn Math(comptime G: type, comptime Proj: type, comptime Bank: type, comptime
             return g.adopt(v);
         }
 
-        /// TURBOEXL3_GLM53F_PF_MOE_HOLD's take: a committed chunk output's data address (its buffer's, at row 0), 0
-        /// when it has none.
-        fn bufferAddr(y: T) usize {
-            return if (mlx.mlx_array_data_bfloat16(y)) |p| @intFromPtr(p) else 0;
-        }
-
         /// The call's rows (x's rows, or `rows.act_row`'s) sorted by slot (a stable counting sort), then in chunks of at
         /// most `prompt_rows` each one `gemm` call; each chunk's KEPT output (bf16 [rows,
         /// hidden]) is appended to `outs` and its rows' assignment rows to `pos`. At most two chunks in flight; every chunk
@@ -882,8 +874,6 @@ pub fn Math(comptime G: type, comptime Proj: type, comptime Bank: type, comptime
             _ = layer;
             const n = rows.slot.len;
             if (n == 0) return;
-            // TURBOEXL3_GLM53F_PF_MOE_HOLD: a DSA layer's hold back in MLX's cache, for this call's first chunks
-            pf_reuse.routed();
             const a = self.allocator;
             var max_slot: u32 = 0;
             for (rows.slot) |sv| max_slot = @max(max_slot, sv);
@@ -930,12 +920,7 @@ pub fn Math(comptime G: type, comptime Proj: type, comptime Bank: type, comptime
                 try outs.ensureUnusedCapacity(alloc, 1);
                 try pos.ensureUnusedCapacity(alloc, c1 - c0);
                 const m = g.mark();
-                // TURBOEXL3_GLM53F_PF_MOE_HOLD's take: the cache across the call's first allocation (where MLX trims a
-                // cache over its limit)
-                const first = chunks == 1 and pf_reuse.measuring();
-                if (first) pf_reuse.at(.first_alloc_before);
                 const ai = try g.hostArray(std.mem.sliceAsBytes(sorted_act[c0..c1]), &.{mc}, .uint32);
-                if (first) pf_reuse.at(.first_alloc_after);
                 const sid = try g.hostArray(std.mem.sliceAsBytes(sorted_slot[c0..c1]), &.{mc}, .uint32);
                 // TURBOEXL3_GLM53F_PF_ROWS: x's rows read through `ai` in the chain's prepare (no gathered copy)
                 const y = if (self.sw.pf_rows) try self.gemmRows(g, x, ai, sid, c1 - c0, tb) else blk: {
@@ -945,14 +930,7 @@ pub fn Math(comptime G: type, comptime Proj: type, comptime Bank: type, comptime
                 };
                 outs.appendAssumeCapacity(g.keep(y));
                 pos.appendSliceAssumeCapacity(order[c0..c1]);
-                // and across the first two chunks' commits (MLX allocates the chain's arrays as it encodes them), with
-                // the output's buffer
-                const meas = pf_reuse.measuring();
-                if (meas) pf_reuse.at(.commit_before);
                 try g.asyncEval(&.{y});
-                // TURBOEXL3_GLM53F_PF_MOE_HOLD: after the second chunk, what the call's first chunks allocated past the
-                // hand-back
-                pf_reuse.committed(chunks, if (meas) bufferAddr(y) else 0);
                 flight[n_flight] = g.keep(y);
                 n_flight += 1;
                 g.resetTo(m);
@@ -966,8 +944,6 @@ pub fn Math(comptime G: type, comptime Proj: type, comptime Bank: type, comptime
                     }
                 }
             }
-            // TURBOEXL3_GLM53F_PF_MOE_HOLD: a call of one chunk measured at its end
-            pf_reuse.committed(0, 0);
             if (self.sw.pf_align and !pf_align_said) {
                 pf_align_said = true;
                 log.info(pf_align_engaged, .{ n, chunks, (n + chunk - 1) / chunk });

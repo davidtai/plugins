@@ -116,8 +116,6 @@ pub fn streamOptionsOf(comptime Bp: type, rows: []const u32, memory: Bp.SlotMemo
 pub const seams = struct {
     /// `TURBOEXL3_GLM53F_PROMPT_KEEP`: `Options.prompt_keep` (the residency policy's prompt-phase admissions).
     pub const prompt_keep = @hasField(B.S.Options, "prompt_keep");
-    /// `TURBOEXL3_GLM53F_DEMAND_SPLIT`: `Options.demand_split` (a lone record's gate/up span in pieces).
-    pub const demand_split = @hasField(B.S.Options, "demand_split");
     /// `TURBOEXL3_GLM53F_ADOPT_PIECES`: `Lookahead.adopt_pieces` (an adopted range's copy in pieces).
     pub const adopt_pieces = @hasField(B.S.Lookahead, "adopt_pieces");
 };
@@ -136,7 +134,6 @@ pub const PoolCounters = struct {
 /// null when none is.
 pub fn missingSeam() ?[]const u8 {
     if (prompt_keep and !seams.prompt_keep) return "TURBOEXL3_GLM53F_PROMPT_KEEP";
-    if (demand_split and !seams.demand_split) return "TURBOEXL3_GLM53F_DEMAND_SPLIT";
     if (adopt_pieces and !seams.adopt_pieces) return "TURBOEXL3_GLM53F_ADOPT_PIECES";
     return null;
 }
@@ -155,9 +152,6 @@ pub fn servedStreamOptions(comptime Bp: type, bank: *const exl3_bank.SDKBank, ro
     // ADOPT_PIECES: an adopted range's copy in as many pieces as the pool has workers
     if (comptime seams.adopt_pieces) {
         if (adopt_pieces) opts.lookahead.?.adopt_pieces = mimo_stream.io_workers;
-    }
-    if (comptime seams.demand_split) {
-        if (demand_split) opts.demand_split = demandSplitPieces(mimo_stream.io_workers);
     }
     return opts;
 }
@@ -188,11 +182,6 @@ pub var prompt_keep: bool = false;
 /// its budget (2): the stream's selector set to 1 once the stream is built (`Stream.init` sized the read pool's slots
 /// and threads from the budget, which stay). Only reads move.
 pub var spec_pick1: bool = false;
-/// turboexl3_glm53f: `TURBOEXL3_GLM53F_DEMAND_SPLIT` (off unless the plugin sets it before the bank opens; a seam of the
-/// kit's stream, `seams.demand_split`): the served options' decode call that reads one record reads its gate/up span as
-/// `demandSplitPieces` pieces, a read pool job each, beside its down span (`Options.demand_split`). Only reads move:
-/// every byte lands in the row the whole span's read writes it to, and the span's gate waits for its last piece.
-pub var demand_split: bool = false;
 /// turboexl3_glm53f: `TURBOEXL3_GLM53F_DEMAND_HELP` (0, off, unless the plugin sets it before the bank opens): the read
 /// pool's demand-first mode for the decode phase (the kit stream's `demandFirst`, as turboexl3_ds41 sets it at its phase
 /// change): set at each `beginDecode`, back to 0 at each prompt phase. 2: an unclaimed lookahead record reads only while
@@ -204,11 +193,6 @@ pub var demand_first: u32 = 0;
 /// into its rows in as many pieces as it has workers (`mimo_stream.io_workers`), the idle workers taking some
 /// (`Lookahead.adopt_pieces`). Only the copy moves: the same bytes into the same rows.
 pub var adopt_pieces: bool = false;
-/// turboexl3_glm53f: the pieces of a lone record's gate/up span at `workers` read pool workers: every worker but the
-/// one its down span takes.
-pub fn demandSplitPieces(workers: u32) u32 {
-    return workers - 1;
-}
 comptime {
     // READ_AHEAD3's read-ahead above is the single-bank form (`speculateAhead`): the bank is one bank layer a routed layer
     if (B.S.multi_bank) @compileError("glm5_next: speculateAhead reads one bank layer a routed layer");
@@ -577,25 +561,7 @@ pub fn SourceOf(comptime fam: Family) type {
             const nt: u32 = @intCast(g.shapeOf(x).d[0]);
             profile.call();
             if (self.decodeLaneAt(nt)) {
-                // turboexl3_glm53f: TURBOEXL3_GLM53F_ROUTE_VIEW (src/route_view.zig): the router's uint32 ids as an int32
-                // view (ids below 288: the same bits; MLX's View shares the buffer), where the stock lane casts them
-                const ids32 = if (try @import("mlx_host").route_view.view(g.s, expert_ids)) |v| try g.adopt(v) else try g.astype(expert_ids, .int32);
-                // turboexl3_glm53f: TURBOEXL3_GLM53F_MOE_COMBINE1 (src/moe_combine1.zig): the call ends before the join's
-                // take (JOIN_INDEXED) and one text reads each position's row in place through the join's order: the stock
-                // join and combine's bits in one launch; a call the text declines takes the stock take and combine
-                if (@import("mlx_host").moe_combine1.on) {
-                    const idx = try self.ex.at(layer).routedHoistIndexed(g, x, ids32, hoist);
-                    const encode_start = profile.now();
-                    if (try @import("mlx_host").moe_combine1.combine(g.s, idx.rows, idx.order, route_weights)) |y| {
-                        profile.charge(.encode, encode_start);
-                        return y;
-                    }
-                    const routed = try g.reshape(try g.take(idx.rows, idx.order, 0), &.{ @intCast(nt), @intCast(top_k), g.shapeOf(idx.rows).d[1] });
-                    const w32 = if (g.dtypeOf(route_weights) == .float32) route_weights else try g.astype(route_weights, .float32);
-                    const output = try combineStock(g, routed, w32);
-                    profile.charge(.encode, encode_start);
-                    return g.keep(output);
-                }
+                const ids32 = try g.astype(expert_ids, .int32);
                 const routed = try self.ex.at(layer).routedHoist(g, x, ids32, hoist);
                 const encode_start = profile.now();
                 const output = try combineStock(g, routed, route_weights);

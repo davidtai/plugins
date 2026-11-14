@@ -25,14 +25,9 @@ pub const RouteCut = enum { off, on };
 pub const StaticOrder = enum { off, sampled };
 pub const TtftTail = enum { off, deferred };
 
-/// The DIG-X prompt wave's rows: the default (batch 27's measured bundle), the control's (g22-exl3's: MiMo's projection
-/// tile; by name), the bounds and the grid (the GEMMs' M tile). 2,048 rows bill as 1,024 (bill.zig `tileBytes`: both
-/// inside NVFP4's tile).
+/// The DIG-X prompt wave's rows by default (batch 27's measured bundle). 2,048 rows bill as 1,024 (bill.zig
+/// `tileBytes`: both inside NVFP4's tile).
 pub const default_wave_rows: u32 = 2048;
-pub const control_wave_rows: u32 = 1024;
-pub const min_wave_rows: u32 = 128;
-pub const max_wave_rows: u32 = 4096;
-pub const wave_rows_step: u32 = 128;
 
 /// The keys this file reads (settings.zig `unknownSetting` admits them beside `setting_keys`).
 pub const keys = [_][]const u8{ "exl3_wave_rows", "prompt_route_cut", "prompt_static_order", "ttft_tail" };
