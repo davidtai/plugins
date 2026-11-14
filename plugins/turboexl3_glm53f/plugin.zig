@@ -27,18 +27,7 @@ pub const env = @import("src/host/env.zig");
 pub const shared = @import("src/host/shared.zig");
 pub const quant_abi = abi;
 pub const routed_t3 = @import("src/routed_t3.zig");
-/// The model's levers on the bank's calls. The lookahead's next-layer scores take the kit's router NAX plan with
-/// `TURBOEXL3_GLM53F_PREDICT` (null: the stock predictor); the one-launch combine and the route view are not in the kit.
-pub const fused_router = struct {
-    /// `TURBOEXL3_GLM53F_PREDICT`, set at the bank's open.
-    pub var predict_on: bool = false;
-    pub fn predict(s: mlx.mlx_stream, x: mlx.mlx_array, router: mlx.mlx_array, correction: mlx.mlx_array) !?mlx.mlx_array {
-        if (!predict_on) return null;
-        // A kit without `blocks.moe.router_nax` (mlx-serve before ddalcu/mlx-serve#1196) has no plan: the stock scores.
-        if (comptime @hasDecl(kit.blocks.moe, "router_nax")) return kit.blocks.moe.router_nax.predict(s, x, router, correction);
-        return null;
-    }
-};
+/// The model's levers on the bank's calls: the one-launch combine and the route view are not in the kit.
 pub const moe_combine1 = struct {
     pub const on = false;
     pub fn combine(_: mlx.mlx_stream, _: mlx.mlx_array, _: mlx.mlx_array, _: mlx.mlx_array) !?mlx.mlx_array {
@@ -338,8 +327,6 @@ var about: [160]u8 = undefined;
 fn openBank(ctx: *const abi.LoadCtx, geo: *const abi.BankGeometry, budget: abi.BankBudget, out: *abi.Bank) callconv(.c) Verdict {
     if (!tkit.nax.available()) return no_nax;
     const sw = readSwitches() catch |e| return Verdict.named(.unsupported, @errorName(e));
-    fused_router.predict_on = bank_rows.parseSwitch(envSpan("TURBOEXL3_GLM53F_PREDICT")) catch |e| return Verdict.named(.unsupported, @errorName(e));
-    if (fused_router.predict_on) log.info("[turboexl3_glm53f] TURBOEXL3_GLM53F_PREDICT=1: the decode lookahead's next-layer scores on the kit's router NAX plan (the stock predictor's bits; any call off the plan scores as before)\n", .{});
     glm5n.setGrowUnfilled(sw.grow_unfilled);
     glm5n.setPromptKeep(sw.prompt_keep);
     glm5n.setSpecPick1(sw.spec_pick1);

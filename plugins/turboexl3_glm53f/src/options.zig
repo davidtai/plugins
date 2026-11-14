@@ -20,7 +20,6 @@ pub const all = [_]Decl{
     .{ .name = "TURBOEXL3_GLM53F_LAYER_BILL", .kind = .bool, .default = "1", .help = "Bill the slot rows at each routed layer's own row size (the pack's v2 manifest), not the widest" },
     .{ .name = "TURBOEXL3_GLM53F_GROW_UNFILLED", .kind = .bool, .default = "1", .help = "Take the decode grow's new slot rows as MLX buffers without the zero fill" },
     .{ .name = "TURBOEXL3_GLM53F_PROMPT_KEEP", .kind = .bool, .default = if (seams.prompt_keep) "1" else "0", .help = "No prompt-phase admission evicts a resident expert (needs the kit stream's prompt_keep seam)" },
-    .{ .name = "TURBOEXL3_GLM53F_PREDICT", .kind = .bool, .default = "0", .help = "The decode lookahead's next-layer scores on the kit's router NAX plan (router_nax.predict: the stock predictor's bits)" },
     .{ .name = "TURBOEXL3_GLM53F_SPEC_PICK1", .kind = .bool, .default = "1", .help = "The decode lookahead reads ahead one record a layer call, its most likely (off: 2); the read pool unchanged" },
     .{ .name = "TURBOEXL3_GLM53F_DEMAND_HELP", .kind = .number, .default = "0", .help = "0 off (rejected in its A/B); 2 decode's read pool puts its demand first and a waiting demand read takes its claimed record's untaken pieces (the kit stream's demandFirst(2))" },
     .{ .name = "TURBOEXL3_GLM53F_ADOPT_PIECES", .kind = .bool, .default = if (seams.adopt_pieces) "1" else "0", .help = "A demand read served from a lookahead record copies its bytes in pieces across the read pool's workers (needs the kit stream's adopt_pieces seam)" },
@@ -37,10 +36,6 @@ pub const all = [_]Decl{
     .{ .name = "TURBOEXL3_GLM53F_PF_STAGE", .kind = .bool, .default = "1", .help = "A prompt call routes its layer's misses before its routing barrier" },
     .{ .name = "TURBOEXL3_GLM53F_PF_DRAIN_LAG", .kind = .bool, .default = "1", .help = "With PF_FEED: a prompt MoE group's drain waits for the next group's first chunk" },
     .{ .name = "TURBOEXL3_GLM53F_PF_INT8", .kind = .number, .default = "0", .help = "Not exact: 0 off; 1 the routed prefill's gate|up and down GEMMs on int8, a scale each activation 128-block; 2 one scale a row; 3 1 and the trunk's KDA qkv and o_proj at prefill rows on int8; 4 1 and every trunk linear at prefill rows on int8" },
-    // the verify's launch trims (src/kda_trim.zig, src/cached_scalars.zig, src/host_zero.zig)
-    // the MTP head's router in ROUTER's plan (src/fused_router.zig)
-    // the MTP draft's step 0 on SMALLOP's texts (src/draft_s0.zig)
-    // a verify linear's producer writing its prepared input, DEC-ONE's GEMV alone after it (src/dec_prep.zig)
 };
 
 /// The plugin's own value of switch `name` when the environment sets none (`all`'s default), or null for a name it does
@@ -95,12 +90,10 @@ fn seamOf(name: []const u8) ?bool {
 
 /// The switches the served configuration keeps off ("0", or "" for a text switch): PF_INT8 (not exact; a server-start
 /// option, 1 to 4), LOGITS_DUMP (a check, never served), PF_RUN_TRIM and DEMAND_HELP (exact, but their A/Bs
-/// rejected them; DEMAND_HELP on the kit stream's `demandFirst(2)` decoded 3.1% slower in g53g2h1), and PREDICT (the
-/// bank's bf16 predictor is one gemv already; `router_nax.predict` serves f16 routers only, so it never engages here).
+/// rejected them; DEMAND_HELP on the kit stream's `demandFirst(2)` decoded 3.1% slower in g53g2h1).
 const off = [_][]const u8{
     "TURBOEXL3_GLM53F_PF_INT8",
     "TURBOEXL3_GLM53F_DEMAND_HELP",
-    "TURBOEXL3_GLM53F_PREDICT",
 };
 fn isOff(name: []const u8) bool {
     for (off) |o| if (std.mem.eql(u8, o, name)) return true;
@@ -127,7 +120,7 @@ test "turboexl3_glm53f stream options: every default is the frozen exact configu
         }
         try t.expectEqualStrings(d.default, defaultOf(d.name).?);
     }
-    try t.expectEqual(@as(usize, 20), all.len);
+    try t.expectEqual(@as(usize, 19), all.len);
     try t.expectEqualStrings("g4m3.t4.t4", defaultOf("TURBOEXL3_GLM53F_BANKED").?);
     try t.expectEqualStrings("g1", defaultOf("TURBOEXL3_GLM53F_DEC").?);
     try t.expectEqualStrings("bk128", defaultOf("TURBOEXL3_GLM53F_PF_OPTS").?);
@@ -138,4 +131,6 @@ test "turboexl3_glm53f stream options: every default is the frozen exact configu
     try t.expect(defaultOf("TURBOEXL3_GLM53F_DSA_HOLD") == null);
     try t.expect(defaultOf("TURBOEXL3_GLM53F_ADOPT_ZC") == null);
     try t.expect(defaultOf("TURBOEXL3_GLM53F_KDA_GPU") == null);
+    // the bank's predictor is one bf16 gemv: no switch replaces it
+    try t.expect(defaultOf("TURBOEXL3_GLM53F_PREDICT") == null);
 }

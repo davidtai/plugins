@@ -57,9 +57,6 @@ pub fn Types(comptime _: Family) type {
 /// gemv over x [n, hidden]), then the sigmoid and the correction as MiMo's F32 route: f32 [n, experts]. Half the F32
 /// copy's bytes and no input cast; the scores pick the lookahead's reads only.
 pub fn scoresBf16(_: *const mimo_math.Predictor, g: *ops.MlxOps, x: T, router: T, correction: T) anyerror!T {
-    // turboexl3_glm53f: TURBOEXL3_GLM53F_PREDICT: the same scores in two launches, no f32 copy of the router
-    // (src/fused_router.zig `predict`); null scores as before
-    if (try @import("mlx_host").fused_router.predict(g.s, x, router, correction)) |r| return g.adopt(r);
     const logits = try g.matmul(x, try g.transpose(router));
     return g.add(try g.sigmoid(try g.astype(logits, .float32)), correction);
 }
