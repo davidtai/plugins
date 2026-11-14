@@ -34,7 +34,9 @@ pub const fused_router = struct {
     pub var predict_on: bool = false;
     pub fn predict(s: mlx.mlx_stream, x: mlx.mlx_array, router: mlx.mlx_array, correction: mlx.mlx_array) !?mlx.mlx_array {
         if (!predict_on) return null;
-        return kit.blocks.moe.router_nax.predict(s, x, router, correction);
+        // A kit without `blocks.moe.router_nax` (mlx-serve before ddalcu/mlx-serve#1196) has no plan: the stock scores.
+        if (comptime @hasDecl(kit.blocks.moe, "router_nax")) return kit.blocks.moe.router_nax.predict(s, x, router, correction);
+        return null;
     }
 };
 pub const moe_combine1 = struct {
