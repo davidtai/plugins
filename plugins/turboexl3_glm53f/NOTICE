@@ -19,6 +19,11 @@ mlx_launch_cache.inc, mimo_gpu_address.inc and q3_event_shim.mm: it gives their 
 table. src/csrc/glm53f_gpu_warm.m replaces sdk/weights/streamed/csrc/mimo_gpu_warm.inc: it gives its C symbols and
 its kernel's text over Metal's own API. Both are this plugin's code.
 
+src/streamed/mimo/kernels/header_mimo_prefill_combine.metal (sha256
+02fe76aebf00d52c9da4b8b89e32fac1b1b8358f1d9e462b7bb222cbbb486005) and mimo_prefill_combine.metal (sha256
+7b0f9aa388d0608ac7653545a19e5f97d886067b39f7fb1f812439499e8cf81f) are mlx-serve's
+src/sdk/weights/streamed/mimo/kernels/ files of the same names at commit 4addfd5b, unchanged.
+
 --------------------------------------------------------------------------------
 mlx-stream
 https://github.com/davidtai/mlx-stream

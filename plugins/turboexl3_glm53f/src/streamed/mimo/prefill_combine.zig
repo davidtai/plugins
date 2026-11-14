@@ -71,11 +71,10 @@ comptime {
     if (sources + 2 + 1 > 31) @compileError("mimo prefill combine: the text's buffers exceed Metal's 31 argument slots");
 }
 
-/// The texts (pinned by `kernels/manifest-prefill-combine.json`; `manifest_sha256` pins the manifest).
+/// The texts (their origin and sha256: NOTICE).
 pub const texts = struct {
     pub const header = @embedFile("kernels/header_mimo_prefill_combine.metal");
     pub const combine = @embedFile("kernels/mimo_prefill_combine.metal");
-    pub const manifest = @embedFile("kernels/manifest-prefill-combine.json");
     /// P7 `inplace`: the same text with its 24 bound sources replaced by the table (`mimo_pc_pick`'s table overload).
     pub const combine_inplace = tableText(combine);
 };
@@ -108,7 +107,6 @@ const inplace_input_names = [_][*:0]const u8{ "tbl", "loc", "w" };
 /// P7 `inplace` (csrc/mimo_gpu_address.inc): each evaluated source's GPU address (its MTLBuffer's plus its offset).
 extern fn mimo_gpu_addresses(arrs: [*]const T, n: usize, out: [*]u64) c_int;
 extern fn dsv41_alloc_last_error() [*:0]const u8;
-pub const manifest_sha256 = "ed3b2e1af2a2803791f337adc73605b0d08f0e733e298da86ef5a90ae323b3f3";
 
 const input_names = blk: {
     var names: [sources + 2][*:0]const u8 = undefined;
