@@ -82,28 +82,34 @@ pinned in `build.zig.zon`.
   load refuses with `an M5-class GPU (NAX) is needed`. We ran macOS 26.6.
 - Enough memory. We measured only an M5 Max with 128 GB, and we did not test a Mac with less memory. If no slot row
   fits, the load stops with `StreamedRowsDoNotFit`.
-- About 377 GB of disk on one volume: 188.2 GB for the pack and 188.4 GB for turboderp's download. The converter
-  hard-links the download's small files, so both must be on that volume. You can delete the download after `finalize`.
+- About 188.3 GB of disk for the pack. To make the pack yourself, you need about 377 GB on one volume instead: 188.2 GB
+  for the pack and 188.4 GB for turboderp's download. The converter hard-links the download's small files, so both
+  must be on that volume. You can delete the download after `finalize`.
 - git, Python 3, the Hugging Face CLI (`hf`), Homebrew, and Xcode with its Metal toolchain.
 
 Two open mlx-serve pull requests raise the speed. #1195 raises decode, and #1205 raises prefill. "Measured" gives
 their numbers.
 
-## Make a pack
+## Get the pack
 
-The converter copies bytes and checks each record. It does not quantize. We have not uploaded the streaming pack to
-Hugging Face yet. Until we do, make it from turboderp's pack with these steps.
+We published the streaming pack on Hugging Face, in the 2.60bpw branch of
+https://huggingface.co/OpensourceWTF/Ling-3.1-flash-streaming-repack-exl3. Download it with this command:
+
+    hf download OpensourceWTF/Ling-3.1-flash-streaming-repack-exl3 --revision 2.60bpw --local-dir <pack>
+
+You can also make the same pack yourself from turboderp's pack. The converter copies bytes and checks each record. It
+does not quantize.
 
 1. Download the 2.60bpw branch:
 
        hf download turboderp/Ling-3.1-flash-exl3 --revision 2.60bpw --local-dir <download>
 
-2. Clone github.com/OpenSourceWTF/qwen38-exl3-mlx-serve-converter. It also holds the Ling script. In the clone, run
-   these commands. `plan` reads the branch's file records from Hugging Face.
+2. Clone https://github.com/OpenSourceWTF/mlx-serve-streaming-pack-converters. The Ling script is in its `ling31`
+   folder. In the clone, run these commands. `plan` reads the branch's file records from Hugging Face.
 
-       python3 scripts/ling_exl3_to_streaming.py plan --src <download> --rev 2.60bpw --plan plan.json
-       python3 scripts/ling_exl3_to_streaming.py run --src <download> --out <pack> --plan plan.json
-       python3 scripts/ling_exl3_to_streaming.py finalize --src <download> --out <pack> --plan plan.json
+       python3 ling31/scripts/ling_exl3_to_streaming.py plan --src <download> --rev 2.60bpw --plan plan.json
+       python3 ling31/scripts/ling_exl3_to_streaming.py run --src <download> --out <pack> --plan plan.json
+       python3 ling31/scripts/ling_exl3_to_streaming.py finalize --src <download> --out <pack> --plan plan.json
 
    A good `run` prints `ALL_SHARDS_PASS <n>/<n>` last. A good `finalize` prints `FINALIZED <pack>: ...`.
 
