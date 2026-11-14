@@ -326,7 +326,9 @@ pub fn SourceOf(comptime fam: Family) type {
         /// bound. `gates` holds every model layer's router (the dense layers' empty): the lookahead's predictor reads the next
         /// routed layer's. `prompt`: the prompt levers' routes (prompt_levers.zig; the scheduler's route cut on either
         /// family, the DIG-X wave size and the rows' counting sort on exl3).
-        pub fn init(a: std.mem.Allocator, io: std.Io, model_dir: []const u8, rows: []const u32, decode_rows: []const u32, gates: []const Gate, stream: mlx.mlx_stream, decode_moe: settings.DecodeMoe, predict: settings.DecodePredict, keep_warm: gpu_warm.Route, tally: expert_tally.Settings, exl3_forms: settings.Exl3Forms, prompt: prompt_levers.Settings, miss_reads: settings.MissReads, prompt_residents: settings.PromptResidents) !*Self {
+        pub fn init(a: std.mem.Allocator, io: std.Io, model_dir: []const u8, rows: []const u32, decode_rows: []const u32, gates: []const Gate, stream: mlx.mlx_stream, keep_warm: gpu_warm.Route, tally: expert_tally.Settings, exl3_forms: settings.Exl3Forms, prompt: prompt_levers.Settings, miss_reads: settings.MissReads, prompt_residents: settings.PromptResidents) !*Self {
+            // The decode lane's route: the hit pass (DEVROUTE) over the banked texts.
+            const decode_moe: settings.DecodeMoe = .hitpass;
             const Bm = Fam.Bridge;
             const bm = Fam.bank;
             var open_diag: sdk.Diag = .{};
@@ -399,10 +401,7 @@ pub fn SourceOf(comptime fam: Family) type {
                     return e;
                 };
                 errdefer m.deinit(&self.g);
-                m.predictor = switch (predict) {
-                    .f32 => try mimo_math.Predictor.install(.f32, geo),
-                    .bf16 => .{ .scores = scoresBf16 },
-                };
+                m.predictor = .{ .scores = scoresBf16 };
                 break :blk m;
             };
             errdefer math.deinit(&self.g);
@@ -431,7 +430,7 @@ pub fn SourceOf(comptime fam: Family) type {
             }
             errdefer if (comptime fam == .exl3) a.free(self.own_gates);
             const fam_gates = if (comptime fam == .exl3) self.own_gates else gates;
-            self.ex = try Fam.Experts.initWith(a, &self.g, &self.stream_source, math, &config, .{ .gates = fam_gates, .event = event, .wide = .{ .seed = true, .hot_first = true, .depth = mimo_stream.wide_depth, .read_ahead = true, .route_cut = prompt.route_cut == .on, .stage = stage_misses, .drain_lag = drain_lag }, .banked = decode_moe != .stock, .devroute = decode_moe == .hitpass });
+            self.ex = try Fam.Experts.initWith(a, &self.g, &self.stream_source, math, &config, .{ .gates = fam_gates, .event = event, .wide = .{ .depth = mimo_stream.wide_depth, .read_ahead = true, .stage = stage_misses, .drain_lag = drain_lag }, .devroute = decode_moe == .hitpass });
             errdefer self.ex.deinit();
             if (self.combine_route == .inplace) self.ex.setJoinlessBound(prefill_combine.inplace_sources);
             if (comptime fam == .exl3) {

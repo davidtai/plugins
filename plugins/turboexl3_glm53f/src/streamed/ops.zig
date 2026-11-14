@@ -49,12 +49,6 @@ fn freeFrom(comptime E: type, list: *std.ArrayList(E), from: usize, comptime fre
     list.shrinkRetainingCapacity(from);
 }
 
-/// The compiled regions a model builds at construction (`prepareTape`), one
-/// closure per region and context (the trunk's config, the draft head's).
-pub const Region = enum { attn_core, qkv_prep, out_prep, gate_prefix, moe_combine, hc_attn_prep, hc_ffn_prep, hc_post, seg2, seg3, draft_kv, markov_step, confidence, shared_mid };
-const n_regions = std.meta.fieldNames(Region).len;
-const contexts_per_region = 2;
-
 // ── MLX backend ──
 
 pub const MlxOps = struct {
@@ -67,52 +61,14 @@ pub const MlxOps = struct {
     /// (`hostIds`, `hostU32`, `hostF32`, `hostBool`, `hostArgmax`); `asyncEval` waits for nothing, nor do `readU32` and
     /// `readBool` (they read what an earlier eval produced).
     waits: u64 = 0,
-    /// `nn.silu` / `nn.softplus` are `mx.compile(shapeless=True)` regions in
-    /// the Python oracle; the same closures are compiled here (a compiled
-    /// graph is not output-preserving against the op chain).
-    silu_fn: mlx.mlx_closure = .{ .ctx = null },
-    softplus_fn: mlx.mlx_closure = .{ .ctx = null },
-    stream_box: *mlx.mlx_stream,
-    /// Compiled trunk regions, one per (region type, construction context).
-    tapes: std.ArrayList(TapeEntry) = .empty,
-    /// Each region's closures by context, filled by `prepareTape`.
-    regions: [n_regions][contexts_per_region]RegionSlot = @splat(@splat(.{})),
-    /// A region's tracing context: borrows the owner's stream and closures.
-    is_child: bool = false,
-
-    const RegionSlot = struct { ctx: ?*const anyopaque = null, compiled: mlx.mlx_closure = .{ .ctx = null } };
-
-    const TapeEntry = struct {
-        key: usize,
-        ctx: *const anyopaque,
-        compiled: mlx.mlx_closure,
-        payload: *anyopaque,
-        free: *const fn (*anyopaque, std.mem.Allocator) void,
-    };
 
     pub fn init(gpa: std.mem.Allocator, s: mlx.mlx_stream) !MlxOps {
-        const box = try gpa.create(mlx.mlx_stream);
-        errdefer gpa.destroy(box);
-        box.* = s;
-        var g: MlxOps = .{ .gpa = gpa, .s = s, .stream_box = box };
-        g.silu_fn = try compileUnary(siluBody, box);
-        errdefer _ = mlx.mlx_closure_free(g.silu_fn);
-        g.softplus_fn = try compileUnary(softplusBody, box);
-        return g;
+        return .{ .gpa = gpa, .s = s };
     }
 
     pub fn deinit(g: *MlxOps) void {
         g.reset();
         g.live.deinit(g.gpa);
-        if (g.is_child) return;
-        for (g.tapes.items) |t| {
-            _ = mlx.mlx_closure_free(t.compiled);
-            t.free(t.payload, g.gpa);
-        }
-        g.tapes.deinit(g.gpa);
-        _ = mlx.mlx_closure_free(g.silu_fn);
-        _ = mlx.mlx_closure_free(g.softplus_fn);
-        g.gpa.destroy(g.stream_box);
     }
 
     pub fn evalAll(g: *MlxOps, xs: []const T) !void {
@@ -383,11 +339,6 @@ pub const MlxOps = struct {
         return g.track(r);
     }
 
-    /// `nn.silu`: the compiled `x * sigmoid(x)`.
-    pub fn silu(g: *MlxOps, x: T) !T {
-        return g.applyUnary(g.silu_fn, x);
-    }
-
     /// `mx.async_eval(xs)`: the GPU starts on `xs`; nothing waits.
     pub fn asyncEval(_: *MlxOps, xs: []const T) !void {
         const vec = mlx.mlx_vector_array_new_data(xs.ptr, xs.len);
@@ -421,54 +372,6 @@ pub const MlxOps = struct {
         if (mlx.mlx_array_size(x) != out.len) return error.HostReadSize;
         std.debug.assert(mlx.mlx_array_dtype(x) == .float32);
         return readInPlace(f32, f32, x, mlx.mlx_array_data_float32(x), out);
-    }
-
-    fn compileUnary(comptime body: fn (mlx.mlx_array, mlx.mlx_stream) ?mlx.mlx_array, box: *mlx.mlx_stream) !mlx.mlx_closure {
-        const Cb = struct {
-            fn call(res: *mlx.mlx_vector_array, input: mlx.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
-                const s: *const mlx.mlx_stream = @ptrCast(@alignCast(payload.?));
-                var x = mlx.mlx_array_new();
-                if (mlx.mlx_vector_array_get(&x, input, 0) != 0) return -1;
-                defer _ = mlx.mlx_array_free(x);
-                const y = body(x, s.*) orelse return -1;
-                const out = [_]mlx.mlx_array{y};
-                res.* = mlx.mlx_vector_array_new_data(&out, 1);
-                _ = mlx.mlx_array_free(y);
-                return 0;
-            }
-        };
-        const raw = mlx.mlx_closure_new_func_payload(&Cb.call, @ptrCast(box), null);
-        defer _ = mlx.mlx_closure_free(raw);
-        var compiled = mlx.mlx_closure{ .ctx = null };
-        try mlx.check(mlx.mlx_compile(&compiled, raw, true));
-        return compiled;
-    }
-
-    fn siluBody(x: mlx.mlx_array, s: mlx.mlx_stream) ?mlx.mlx_array {
-        var sig = mlx.mlx_array_new();
-        defer _ = mlx.mlx_array_free(sig);
-        if (mlx.mlx_sigmoid(&sig, x, s) != 0) return null;
-        var y = mlx.mlx_array_new();
-        if (mlx.mlx_multiply(&y, x, sig, s) != 0) {
-            _ = mlx.mlx_array_free(y);
-            return null;
-        }
-        return y;
-    }
-
-    fn softplusBody(x: mlx.mlx_array, s: mlx.mlx_stream) ?mlx.mlx_array {
-        // `mx.logaddexp(x, 0)`: the Python int is weak, so 0 takes x's dtype.
-        const zero = switch (mlx.mlx_array_dtype(x)) {
-            .float32 => mlx.mlx_array_new_float(0),
-            else => return null,
-        };
-        defer _ = mlx.mlx_array_free(zero);
-        var y = mlx.mlx_array_new();
-        if (mlx.mlx_logaddexp(&y, x, zero, s) != 0) {
-            _ = mlx.mlx_array_free(y);
-            return null;
-        }
-        return y;
     }
 };
 

@@ -12,9 +12,7 @@ const T = mlx.mlx_array;
 pub const Profile = struct {
     pub const enabled = profile.enabled;
     pub const now = profile.now;
-    pub const Mode = enum { stream, base_seed, base_end };
     pub const charge = profile.charge;
-    pub fn setMode(_: Mode) void {}
     pub fn countWideCall() void {}
 };
 
@@ -47,14 +45,8 @@ pub const Math = struct {
     }
 };
 
-pub const PredictRoute = enum { f32, bf16 };
-
 pub const Predictor = struct {
     scores: *const fn (*const Predictor, *ops.MlxOps, T, T, T) anyerror!T = scoresF32,
-
-    pub fn install(_: PredictRoute, _: anytype) !Predictor {
-        return .{};
-    }
 
     pub fn deinit(_: *Predictor) void {}
 

@@ -63,12 +63,6 @@ pub const assertSource = sdk_ext.expert.assertSource;
 
 // ── The executor: the model's routed hook over a source ──
 
-/// `argsort(positions)` of unique positions: `inv[pos[j]] = j` (the row of
-/// the joined outputs that holds routed position `pos[j]`).
-fn invertPositions(pos: []const u32, inv: []u32) void {
-    for (pos, 0..) |p, j| inv[p] = @intCast(j);
-}
-
 /// The most sources JOINLESS's combine reads (`dsv41_kernel_routes.JoinlessCombine.sources`).
 pub const joinless_sources = 24;
 
@@ -181,65 +175,37 @@ pub const Routes = struct {
     prefill: bool = false,
 };
 
-/// The wide lane's read schedule, chosen at construction (`Options.wide`; both
+/// The wide lane's read schedule, chosen at construction (`Options.wide`; each
 /// exact: the same rows, slots and kernels, only the order and timing of reads
-/// and evals change).
+/// and evals change). Every call seeds its layer's residency with its own ids (the most routed experts protected in
+/// the persistent rows), feeds its groups hottest first (routed rows descending, ties by id) and drains each group once
+/// (its banks' waves queued). Its rows are bucketed by group once (a stable counting sort into the join's scratch,
+/// `bucketRowsByGroup`), each group's bank passes over its own rows only, in the same order.
 pub const Wide = struct {
-    /// Each call seeds its layer's residency with its own ids (the most routed
-    /// experts protected in the persistent rows) and drains each group once
-    /// (its banks' waves queued).
-    seed: bool = false,
-    /// Each call feeds its groups hottest first (routed rows descending, ties by
-    /// id) instead of in first appearance. `seed` + `hot_first` = the wide feed.
-    hot_first: bool = false,
     /// Groups in flight: 2 routes (reads) the next group before this
     /// group's waves (the source's `wideDepth` must allow it).
     depth: u8 = 1,
-    /// Experts with at most this many rows in the call run the decode lane's
-    /// math (the GEMV, in chunks of the math's `max_decode_rows`) after their
-    /// bank's wide waves, not the wide route (0: none). ROUNDING-CLASS against
-    /// the wide route: its own reference family.
-    cold_rows: u8 = 0,
-    /// Every group's base-bank rows of a call built as ONE call's waves after the groups' transient
-    /// waves (their slots held until then): fewer, fuller waves. Exact: a wave's rows are
-    /// independent of its composition and the combine folds by routed position.
-    defer_base: bool = false,
     /// P1: each layer's predicted seed read into its persistent rows (the empty ones, then those of the
     /// residents the prediction leaves out) while its attention runs (the model's predictor pass hands it
     /// over, `Hook.readAheadSeed`, in every prompt pass), landed at the routing barrier before the seed.
-    /// Exact: it chooses reads and rows only. Needs `seed`.
+    /// Exact: it chooses reads and rows only.
     read_ahead: bool = false,
-    /// P1b: with `defer_base` and the seed, the deferred base call runs once the seed's groups are read (after the first
-    /// group with a transient row), so the later groups' reads overlap its drain; later base rows run in a last call.
-    /// Exact: the same rows, slots and kernels; only the call's place in the schedule changes.
-    base_at_seed: bool = false,
-    /// With `base_at_seed`: the seed's ranks grouped apart from the stream's (the last seed group holds no stream
-    /// record) and the base call issued after the last seed group, so only the seed's own reads precede it. Exact:
-    /// each expert's rows and kernel are its own whatever its group; the combine folds by routed position.
-    seed_aligned: bool = false,
-    /// The route-plan cut (glm5next/route-plan, cd6f1ec): the call's rows bucketed by group once (a stable counting sort
-    /// into the join's scratch, `bucketRowsByGroup`), each group's bank passes over its own rows only, in the same order
-    /// (byte-identical plans), and the distinct experts with their counts in one pass. Off (the control): every bank
-    /// pass of every group walks the call's every row. Exact: host planning only.
-    route_cut: bool = false,
     /// turboexl3_glm53f (TURBOEXL3_GLM53F_PF_STAGE): a prompt call of at least 8 rows per expert (nearly every expert
     /// routed) routes its layer's misses before its routing barrier: as many as `depth` groups hold, in expert order,
     /// into the transient windows with every resident held (no staged miss evicts one: `holdResidents`), so their reads
     /// run while the GPU runs the layer's attention, which the barrier waits for. The call's groups are those staged
     /// groups first (their experts the call does not route stay in them, with no rows), then its other experts hottest
     /// first, every group on the stock route (no P7 plan: a staged route is live before the call's order is known). Exact:
-    /// the same kernels over the same rows; only which rows hold a record, and when it is read, change. Needs `seed` and
-    /// `hot_first`.
+    /// the same kernels over the same rows; only which rows hold a record, and when it is read, change.
     stage: bool = false,
-    /// turboexl3_glm53f (TURBOEXL3_GLM53F_PF_DRAIN_LAG): with `seed`, a group's one drain, its slots' release and the
+    /// turboexl3_glm53f (TURBOEXL3_GLM53F_PF_DRAIN_LAG): a group's one drain, its slots' release and the
     /// route `depth` groups on wait for the next group's first committed chunk (the math's `LagPending`, whose hook the
     /// math's prompt call runs at that commit), or for the next group's banks when it commits none, in place of running
     /// before the next group is encoded: the GPU runs the group's last chunks while the host builds the next group's
     /// first. Exact: the same kernels over the same rows in the same order on the stream; a group's slots go back only
-    /// after its own drain, and in group order. Needs `seed`, `depth` 2 or more (the next group's route was made before),
-    /// no `defer_base` or cold rows, and a math with `LagPending`.
+    /// after its own drain, and in group order. Needs `depth` 2 or more (the next group's route was made before) and a
+    /// math with `LagPending`.
     drain_lag: bool = false,
-    pub const max_cold_rows = 8;
 };
 
 /// A wide call's rows bucketed by group, each group's rows in ascending row order (a stable counting sort): `ids` the
@@ -337,40 +303,18 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
         transient_released: bool = false,
         /// (profile builds: `wide_profile.enabled`) The last wide call's JOINLESS merge (`MergeStats`); compiled out elsewhere.
         last_merge: if (wide_profile.enabled) MergeStats else void = if (wide_profile.enabled) .{} else {},
-        /// The decode lane's wave stages, bound at construction (`Options.banked`): one group per bank (the stock route)
-        /// or one banked group over every bank.
-        gate_up_wave: *const GateUpWaveFn = gateUpWaveGrouped,
-        down_wave: *const DownWaveFn = downWaveGrouped,
-        /// Where a decode call commits the caller's hoist, bound at construction (`Options.hoist_first`): behind the
-        /// hit wave (the stock route: `pre_barrier` commits nothing, `post_hit` commits the hoist), or right behind
-        /// the routing barrier's arrays, before the host waits on them (HOIST_FIRST: `pre_barrier` commits both,
-        /// `post_hit` nothing), so the GPU runs the hoist while the host wakes, routes and encodes the hit wave.
-        pre_barrier: *const PreBarrierFn = preBarrierNone,
-        post_hit: *const PostHitFn = postHitHoist,
         /// DEVROUTE (`Options.devroute`): per layer two resident LUTs (u32 [n_experts], host arrays written in place, kept),
         /// the one each layer's next decode call reads (`dev_parity`): a call reads one, its route's result is written
         /// into the other, so the host never writes a LUT a committed wave may still read. Empty without the route.
         devroute: bool = false,
         dev_lut: [][2]T = &.{},
         dev_parity: []u1 = &.{},
-        /// A gated scheduler's decode call's miss parts, bound at construction (`bindMergeGateWaits`): each projection of
-        /// each bank waited on its own (the stock route), or every array of one gate value in one wait (MERGE_GATE_WAITS).
-        gated_parts: if (routes.gated) *const GatedPartsFn else void = if (routes.gated) gatedPartsStock else {},
-
-        const GateUpWaveFn = fn (self: *Self, g: *G, layer: u32, xf: T, k: u32, sv: Served, w: u8, over: ?*const [n_banks]?Arrays) anyerror!Wave;
-        const GatedPartsFn = fn (self: *Self, g: *G, layer: u32, xf: T, k: u32, sv: Served, gates: expert_stream.Gates, acc: *Acc) anyerror!void;
-        const DownWaveFn = fn (self: *Self, g: *G, layer: u32, wave: *const Wave, acc: *Acc, over: ?*const [n_banks]?Arrays) anyerror![]const T;
-        const PreBarrierFn = fn (g: *G, barrier: []const T, hoist: []const T) anyerror!void;
-        const PostHitFn = fn (g: *G, hoist: []const T) anyerror!void;
-
-        /// `banked`: the math's banked route (its `has_banked`; the quant installed it) runs every wave as one group.
-        /// `hoist_first`: HOIST_FIRST (exact: the same evals, only their commit order moves) commits a decode call's
-        /// hoist right behind its routing barrier's arrays, before the barrier's wait, instead of behind the hit wave.
+        /// Every wave runs as one group on the math's banked route (its `has_banked`; the quant installed it).
         /// `devroute`: DEVROUTE (exact): in decode, each call's hit wave is a device graph (the routed ids through the
         /// layer's resident LUT into the banked texts, every routed pair) committed behind the barrier's arrays, before the
         /// host's wait and route; the host then routes and builds only the miss parts; the join takes every hit pair from
-        /// the device wave and every miss pair from its part. Needs the banked route.
-        pub const Options = struct { gates: []const Gate = &.{}, event: ?expert_event.Event = null, wide: Wide = .{}, banked: bool = false, hoist_first: bool = false, devroute: bool = false };
+        /// the device wave and every miss pair from its part.
+        pub const Options = struct { gates: []const Gate = &.{}, event: ?expert_event.Event = null, wide: Wide = .{}, devroute: bool = false };
 
         /// The wide lane's host scratch, reused across calls.
         const WideScratch = struct {
@@ -380,9 +324,6 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             distinct: std.ArrayList(u16) = .empty,
             /// Per expert: its rows in the call (the feed's order).
             count: std.ArrayList(u32) = .empty,
-            cold_slot: std.ArrayList(u32) = .empty,
-            cold_act: std.ArrayList(u32) = .empty,
-            cold_pos: std.ArrayList(u32) = .empty,
             /// The unjoined route: a call's rows' routed positions, and its wave-ordered rows' call rows.
             call_pos: std.ArrayList(u32) = .empty,
             wave_pos: std.ArrayList(u32) = .empty,
@@ -395,10 +336,6 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             loc: std.ArrayList(i32) = .empty,
             /// JOINLESS: the merge's plan (`mergeJoinless`).
             jl: JoinlessScratch(T) = .{},
-            /// The deferred base-bank rows (`Wide.defer_base`): slots, act rows, routed positions.
-            def_slot: std.ArrayList(u32) = .empty,
-            def_act: std.ArrayList(u32) = .empty,
-            def_pos: std.ArrayList(u32) = .empty,
             /// `Wide.route_cut`: the call's rows by group (`groupRows`; the rows themselves in `inv`, free until the join):
             /// per expert its group, the groups' row offsets.
             grp_of: std.ArrayList(u16) = .empty,
@@ -407,7 +344,7 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             staged: std.ArrayList(u16) = .empty,
 
             fn deinit(w: *WideScratch, a: std.mem.Allocator) void {
-                inline for (.{ &w.ids, &w.first, &w.distinct, &w.count, &w.cold_slot, &w.cold_act, &w.cold_pos, &w.call_pos, &w.wave_pos, &w.slot, &w.act_row, &w.pos, &w.inv, &w.kept, &w.loc, &w.def_slot, &w.def_act, &w.def_pos, &w.grp_of, &w.grp_off, &w.staged }) |l| l.deinit(a);
+                inline for (.{ &w.ids, &w.first, &w.distinct, &w.count, &w.call_pos, &w.wave_pos, &w.slot, &w.act_row, &w.pos, &w.inv, &w.kept, &w.loc, &w.grp_of, &w.grp_off, &w.staged }) |l| l.deinit(a);
                 w.jl.deinit(a);
             }
         };
@@ -423,16 +360,12 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             if (routes.gated and G == ops.MlxOps and opt.event == null) return error.GatedNeedsEvent;
             const wr = opt.wide;
             if (wr.depth < 1 or wr.depth > expert_stream.max_wide_depth) return error.InvalidWideRoute;
-            if ((wr.seed or wr.hot_first or wr.depth > 1 or wr.cold_rows > 0) and !routes.prefill) return error.InvalidWideRoute;
-            if (wr.cold_rows > Wide.max_cold_rows) return error.InvalidWideRoute;
-            if (wr.seed and comptime !@hasDecl(S, "seedPrefill")) return error.InvalidWideRoute;
-            if (wr.defer_base and (wr.cold_rows > 0 or !routes.prefill or comptime !@hasDecl(S, "holdBase"))) return error.InvalidWideRoute;
-            if (wr.read_ahead and (!wr.seed or comptime !@hasDecl(S, "readAheadSeed"))) return error.InvalidWideRoute;
-            if (wr.base_at_seed and (!wr.seed or !wr.defer_base)) return error.InvalidWideRoute;
-            if (wr.seed_aligned and (!wr.base_at_seed or !wr.hot_first or comptime !@hasDecl(S, "seedRanks"))) return error.InvalidWideRoute;
-            if (wr.stage and (!wr.seed or !wr.hot_first or wr.defer_base or wr.seed_aligned or comptime !(@hasDecl(S, "stageMisses") and @hasDecl(S, "holdResidents")))) return error.InvalidWideRoute;
-            if (wr.drain_lag and (!wr.seed or wr.depth < 2 or wr.defer_base or wr.cold_rows > 0 or comptime !@hasDecl(M, "LagPending"))) return error.InvalidWideRoute;
-            if (opt.banked and comptime !hasBanked()) return error.BankedNotInMath;
+            if (comptime routes.prefill and !@hasDecl(S, "seedPrefill")) @compileError(@typeName(S) ++ ": the wide lane seeds its residency");
+            if (wr.depth > 1 and !routes.prefill) return error.InvalidWideRoute;
+            if (wr.read_ahead and comptime !@hasDecl(S, "readAheadSeed")) return error.InvalidWideRoute;
+            if (wr.stage and comptime !(@hasDecl(S, "stageMisses") and @hasDecl(S, "holdResidents"))) return error.InvalidWideRoute;
+            if (wr.drain_lag and (wr.depth < 2 or comptime !@hasDecl(M, "LagPending"))) return error.InvalidWideRoute;
+            if (comptime !hasBanked()) @compileError(@typeName(M) ++ ": the decode lane runs the math's banked route");
             if (wr.depth > 1) {
                 if (comptime @hasDecl(S, "wideDepth")) {
                     if (source.wideDepth() < wr.depth) return error.WideDepthExceedsSource;
@@ -446,18 +379,7 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             }
             var self: Self = .{ .a = a, .source = source, .math = math, .hidden = @intCast(c.hidden_size), .n_experts = c.n_routed_experts, .banks = banks, .gates = opt.gates, .g = g, .wide_route = wr };
             if (opt.event) |e| self.event = e;
-            if (comptime hasBanked()) {
-                if (opt.banked) {
-                    self.gate_up_wave = gateUpWaveBanked;
-                    self.down_wave = downWaveBanked;
-                }
-            }
-            if (opt.hoist_first) {
-                self.pre_barrier = preBarrierHoist;
-                self.post_hit = postHitNone;
-            }
             if (opt.devroute) {
-                if (!opt.banked) return error.DevrouteNeedsBanked;
                 if (comptime !(@hasDecl(S, "residentLut") and @hasDecl(S, "decoding"))) return error.DevrouteNotInSource;
                 self.devroute = true;
             }
@@ -506,12 +428,6 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
         /// (hits: their resident (bank, row), the host's plan's same; misses: base row 0, never joined); `[n * k, hidden]`
         /// in routed order.
         fn devWave(self: *Self, g: *G, layer: u32, xf: T, indices: T, n: u32, k: u32) !T {
-            if (comptime !hasBanked()) {
-                return error.DevrouteNeedsBanked;
-            } else return self.devWaveIn(g, layer, xf, indices, n, k);
-        }
-
-        fn devWaveIn(self: *Self, g: *G, layer: u32, xf: T, indices: T, n: u32, k: u32) !T {
             const nk: c_int = @intCast(n * k);
             const lut = self.dev_lut[layer][self.dev_parity[layer]];
             const ids = try g.take(lut, try g.reshape(indices, &.{nk}), 0);
@@ -521,25 +437,6 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             const banks = try self.bankedArrays(layer, null);
             return self.math.downBanked(g, try self.math.gateUpBanked(g, x, ids, &banks), ids, &banks);
         }
-
-        /// The stock route: the barrier's wait commits its own arrays; nothing is committed ahead of it.
-        fn preBarrierNone(_: *G, _: []const T, _: []const T) !void {}
-
-        /// HOIST_FIRST: the barrier's arrays in one commit (the event the wait reads signals at its end), then the hoist
-        /// in its own commit behind it, so the wait returns at the router's end while the GPU runs the hoist. A call
-        /// with no hoist commits the barrier's arrays alone (the wait that follows is then only a wait).
-        fn preBarrierHoist(g: *G, barrier: []const T, hoist: []const T) !void {
-            try g.asyncEval(barrier);
-            if (hoist.len > 0) try g.asyncEval(hoist);
-        }
-
-        /// The stock route: the hoist is committed behind the hit wave, ahead of every miss wave.
-        fn postHitHoist(g: *G, hoist: []const T) !void {
-            if (hoist.len > 0) try g.asyncEval(hoist);
-        }
-
-        /// HOIST_FIRST: the hoist was committed before the barrier's wait.
-        fn postHitNone(_: *G, _: []const T) !void {}
 
         fn hasBanked() bool {
             return @hasDecl(M, "has_banked") and M.has_banked;
@@ -708,54 +605,6 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             h: [n_banks]T = undefined,
         };
 
-        /// The positions of wave `w`, grouped by bank in first-appearance order
-        /// (`Exl3PackedOps.gate_up`'s groups), each group's gate/up + SwiGLU.
-        fn gateUpWaveGrouped(self: *Self, g: *G, layer: u32, xf: T, k: u32, sv: Served, w: u8, over: ?*const [n_banks]?Arrays) anyerror!Wave {
-            var wave: Wave = .{};
-            for (sv.waves, sv.refs, 0..) |wv, ref, pos| {
-                if (wv != w) continue;
-                const gi = for (wave.groups[0..wave.n], 0..) |gr, i| {
-                    if (gr.bank == ref.bank) break i;
-                } else blk: {
-                    wave.groups[wave.n] = .{ .bank = ref.bank };
-                    wave.n += 1;
-                    break :blk wave.n - 1;
-                };
-                const gr = &wave.groups[gi];
-                gr.pos[gr.n] = @intCast(pos);
-                gr.n += 1;
-            }
-            for (wave.groups[0..wave.n], 0..) |*gr, i| {
-                const arrays = (if (over) |o| o[@backingInt(gr.bank)] else self.banks[layer][@backingInt(gr.bank)]).?;
-                var tok: [max_route_ids]i32 = undefined;
-                var rows: [max_route_ids]u32 = undefined;
-                for (gr.pos[0..gr.n], tok[0..gr.n], rows[0..gr.n]) |pos, *t, *r| {
-                    t.* = @intCast(pos / k);
-                    r.* = sv.refs[pos].row;
-                }
-                const n: c_int = @intCast(gr.n);
-                const x = try g.take(xf, try g.hostArray(std.mem.sliceAsBytes(tok[0..gr.n]), &.{n}, .int32), 0);
-                wave.ids[i] = try g.hostArray(std.mem.sliceAsBytes(rows[0..gr.n]), &.{n}, .uint32);
-                wave.h[i] = try self.math.gateUp(g, x, wave.ids[i], arrays.gate, arrays.up);
-            }
-            return wave;
-        }
-
-        /// Each group's down; the outputs join the call's accumulator.
-        fn downWaveGrouped(self: *Self, g: *G, layer: u32, wave: *const Wave, acc: *Acc, over: ?*const [n_banks]?Arrays) anyerror![]const T {
-            const first = acc.n_outs;
-            for (wave.groups[0..wave.n], 0..) |*gr, i| {
-                const arrays = (if (over) |o| o[@backingInt(gr.bank)] else self.banks[layer][@backingInt(gr.bank)]).?;
-                acc.outs[acc.n_outs] = try self.math.down(g, wave.h[i], wave.ids[i], arrays.down);
-                acc.n_outs += 1;
-                for (gr.pos[0..gr.n]) |pos| {
-                    acc.pos[acc.n_pos] = pos;
-                    acc.n_pos += 1;
-                }
-            }
-            return acc.outs[first..acc.n_outs];
-        }
-
         /// A wave's bank arrays for the banked texts: each bank's; a bank without arrays (no rows bound, or not waited
         /// in a gated part) is given another bank's (the packed ids never name it).
         fn bankedArrays(self: *Self, layer: u32, over: ?*const [n_banks]?Arrays) ![n_banks]Arrays {
@@ -806,64 +655,15 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             return acc.outs[first..acc.n_outs];
         }
 
-        /// The gated waves on the route bound at construction (`gated_parts`).
-        fn gatedParts(self: *Self, g: *G, layer: u32, xf: T, k: u32, sv: Served, gates: expert_stream.Gates, acc: *Acc) !void {
-            return self.gated_parts(self, g, layer, xf, k, sv, gates, acc);
-        }
-
-        /// MERGE_GATE_WAITS bound (a decode call's gated miss parts wait once per gate value), once at construction,
-        /// before any call. Needs the gated route.
-        pub fn bindMergeGateWaits(self: *Self) !void {
-            if (comptime routes.gated) {
-                self.gated_parts = gatedPartsMerged;
-            } else return error.MergeGateWaitsNeedsGated;
-        }
-
-        /// The gated waves (the lookahead4 lane's event gate): every part's
-        /// gate/up over bank arrays waited at `gu`, then part p's down over
-        /// arrays waited at `down_first + p`, ordered after every gate/up and
-        /// the previous part's down. Nothing waits on the host. Each projection
-        /// of each bank waits on its own (the stock route).
-        fn gatedPartsStock(self: *Self, g: *G, layer: u32, xf: T, k: u32, sv: Served, gates: expert_stream.Gates, acc: *Acc) anyerror!void {
-            var gu: [n_banks]?Arrays = @splat(null);
-            for (sv.waves, sv.refs) |w, ref| {
-                const b = @backingInt(ref.bank);
-                if (w == 0 or gu[b] != null) continue;
-                const arrays = self.banks[layer][b].?;
-                gu[b] = .{ .gate = try self.waitProj(g, arrays.gate, gates.gu, &.{}), .up = try self.waitProj(g, arrays.up, gates.gu, &.{}), .down = arrays.down };
-            }
-            var waves: [max_route_ids]Wave = undefined;
-            var hs: [max_route_ids]T = undefined;
-            var n_hs: usize = 0;
-            for (0..sv.n_parts) |p| {
-                waves[p] = try self.gate_up_wave(self, g, layer, xf, k, sv, @intCast(p + 1), &gu);
-                for (waves[p].h[0..waves[p].n]) |h| {
-                    hs[n_hs] = h;
-                    n_hs += 1;
-                }
-            }
-            var prev: []const T = &.{};
-            for (0..sv.n_parts) |p| {
-                var deps: [2 * max_route_ids]T = undefined;
-                @memcpy(deps[0..n_hs], hs[0..n_hs]);
-                @memcpy(deps[n_hs..][0..prev.len], prev);
-                var dn = gu;
-                for (&dn) |*d| if (d.*) |*arr| {
-                    arr.down = try self.waitProj(g, arr.down, gates.down_first + p, deps[0 .. n_hs + prev.len]);
-                };
-                prev = try self.down_wave(self, g, layer, &waves[p], acc, &dn);
-            }
-        }
-
-        /// MERGE_GATE_WAITS: `gatedPartsStock`'s waves over the same arrays, gates and deps, with one event wait per gate
-        /// value: the gate and up arrays of every bank the call's misses read wait at `gu` together, then part p's down
-        /// arrays of every such bank at `down_first + p` together (behind the same deps). The stock route waits each
-        /// projection of each bank on its own at those same values. Exact: every array aliases the same buffer behind the
-        /// same value; only the waits (each one pass-through primitive and one encoder split) are fewer.
-        fn gatedPartsMerged(self: *Self, g: *G, layer: u32, xf: T, k: u32, sv: Served, gates: expert_stream.Gates, acc: *Acc) anyerror!void {
+        /// The gated waves (the lookahead4 lane's event gate): every part's gate/up over bank arrays waited at `gu`, then
+        /// part p's down over arrays waited at `down_first + p`, ordered after every gate/up and the previous part's down.
+        /// Nothing waits on the host. One event wait per gate value: the gate and up arrays of every bank the call's misses
+        /// read wait at `gu` together, then part p's down arrays of every such bank at `down_first + p` together (behind
+        /// the same deps).
+        fn gatedParts(self: *Self, g: *G, layer: u32, xf: T, k: u32, sv: Served, gates: expert_stream.Gates, acc: *Acc) anyerror!void {
             const pc = EventProjection.count;
             var gu: [n_banks]?Arrays = @splat(null);
-            // The banks the misses read, in the stock route's order (first appearance), each one's gate then up arrays.
+            // The banks the misses read, in first appearance, each one's gate then up arrays.
             var order: [n_banks]usize = undefined;
             var nb: usize = 0;
             var seen: [n_banks]bool = @splat(false);
@@ -890,7 +690,7 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             var hs: [max_route_ids]T = undefined;
             var n_hs: usize = 0;
             for (0..sv.n_parts) |p| {
-                waves[p] = try self.gate_up_wave(self, g, layer, xf, k, sv, @intCast(p + 1), &gu);
+                waves[p] = try self.gateUpWaveBanked(g, layer, xf, k, sv, @intCast(p + 1), &gu);
                 for (waves[p].h[0..waves[p].n]) |h| {
                     hs[n_hs] = h;
                     n_hs += 1;
@@ -917,7 +717,7 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
                         i += 1;
                     };
                 }
-                prev = try self.down_wave(self, g, layer, &waves[p], acc, &dn);
+                prev = try self.downWaveBanked(g, layer, &waves[p], acc, &dn);
             }
         }
 
@@ -926,35 +726,13 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
         /// `waitGu` and down after `waitDown`, each wave started on the GPU;
         /// release; the outputs in the router's order, `[n, k, hidden]` f32.
         pub fn run(self: *Self, g: *G, layer: u32, xf: T, indices: T, hoist: []const T) !T {
-            return self.runEnd(g, layer, xf, indices, hoist, .take);
-        }
-
-        /// A decode-lane call's outputs before the join's take (`Hook.routedHoistIndexed`, JOIN_INDEXED: the caller's
-        /// combine reads the rows in place): the concatenated outputs [rows, hidden] and each routed position's row in
-        /// them, u32 [n * k] (`joinOrder`; the stock join takes exactly these rows).
-        pub const Indexed = struct { rows: T, order: T };
-
-        /// How a call ends: the join's take (`run`, every caller's route) or the indexed rows (JOIN_INDEXED).
-        const Ending = enum { take, indexed };
-
-        fn runEnd(self: *Self, g: *G, layer: u32, xf: T, indices: T, hoist: []const T, comptime ending: Ending) !(if (ending == .take) T else Indexed) {
             const n: u32 = @intCast(g.shapeOf(xf).dim(0));
             const k: u32 = @intCast(g.shapeOf(indices).dim(1));
             const n_ids = n * k;
             // A math with its own prefill token threshold routes by logical M.
             // DeepSeek keeps its decode / verify route through 48 top-6 ids.
-            if (if (comptime @hasDecl(M, "prefill_min_tokens")) n >= M.prefill_min_tokens else n_ids > max_route_ids) {
-                // Only a decode-width layer hoists (the trunk's small-rows segments).
-                std.debug.assert(hoist.len == 0);
-                if (comptime ending == .indexed) {
-                    // The indexed join serves the decode lane only (a wide call joins in its combine already).
-                    return error.IndexedJoinWideCall;
-                } else if (comptime !routes.prefill) {
-                    return error.PrefillLaneNotPorted;
-                } else {
-                    return self.runWide(g, layer, xf, indices, n, k);
-                }
-            }
+            // A wide call is the wide lane's (`Hook.routedParts`).
+            if (if (comptime @hasDecl(M, "prefill_min_tokens")) n >= M.prefill_min_tokens else n_ids > max_route_ids) return error.WideCallOnDecodeLane;
             var id_buf: [max_route_ids]u16 = undefined;
             var score_buf: [expert_lookahead.max_rows * 512]f32 = undefined;
             var scores: []const f32 = &.{};
@@ -974,8 +752,6 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
                 try g.asyncEval(bar[0..n_bar]);
                 try g.asyncEval(&.{d});
             }
-            // HOIST_FIRST commits them and the hoist here (the evals below then only wait); the stock route nothing.
-            try self.pre_barrier(g, bar[0..n_bar], hoist);
             if (n_bar > 1) try g.evalAll(bar[0..n_bar]);
             if (sc) |s| scores = try g.hostF32(s, score_buf[0 .. n * self.n_experts]);
             const ids = try g.hostIds(indices, id_buf[0..n_ids]);
@@ -992,13 +768,13 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
                 acc.n_pos = n_ids;
             } else {
                 // Residents: gate/up and down at once.
-                const hits = try self.gate_up_wave(self, g, layer, xf, k, sv, 0, null);
-                if (hits.n > 0) try g.asyncEval(try self.down_wave(self, g, layer, &hits, &acc, null));
+                const hits = try self.gateUpWaveBanked(g, layer, xf, k, sv, 0, null);
+                if (hits.n > 0) try g.asyncEval(try self.downWaveBanked(g, layer, &hits, &acc, null));
             }
-            // VERIFY_ENCODE hoist: behind the hit wave, ahead of every miss wave (HOIST_FIRST: committed before the barrier's wait).
+            // VERIFY_ENCODE hoist: behind the hit wave, ahead of every miss wave.
             // turboexl3_glm53f: SHARED_HOIST: committed only when the call misses (a miss wave waits for its bytes); a call
             // with no miss part leaves it to the next barrier's evaluation, where the trunk's add reads it.
-            try self.post_hit(g, if (sv.n_parts > 0) hoist else &.{});
+            if (sv.n_parts > 0 and hoist.len > 0) try g.asyncEval(hoist);
             if (routes.gated) {
                 if (try self.source.gate(call)) |gates| {
                     try self.gatedParts(g, layer, xf, k, sv, gates, &acc);
@@ -1006,16 +782,16 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             } else for (0..sv.n_parts) |p| {
                 const part: u32 = @intCast(p);
                 try self.source.waitGu(call, part);
-                const wave = try self.gate_up_wave(self, g, layer, xf, k, sv, @intCast(p + 1), null);
+                const wave = try self.gateUpWaveBanked(g, layer, xf, k, sv, @intCast(p + 1), null);
                 try g.asyncEval(wave.h[0..wave.n]);
                 try self.source.waitDown(call, part);
-                try g.asyncEval(try self.down_wave(self, g, layer, &wave, &acc, null));
+                try g.asyncEval(try self.downWaveBanked(g, layer, &wave, &acc, null));
             }
             self.source.release(call);
             released = true;
             // DEVROUTE: the layer's next call reads the policy after this route (the other LUT of the pair).
             if (dev != null) try self.devLutAfterRoute(g, layer);
-            return if (comptime ending == .take) self.join(g, &acc, n, k) else joinIndexed(g, &acc, n, k);
+            return self.join(g, &acc, n, k);
         }
 
         /// Each routed position's row in the concatenated outputs: the LAST row carrying it (DEVROUTE's miss parts follow
@@ -1035,15 +811,6 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             return g.reshape(try g.take(joined, ord, 0), &.{ @intCast(n), @intCast(k), self.hidden });
         }
 
-        /// `join` without its take: the concatenated outputs and the order the take would read them in (JOIN_INDEXED).
-        fn joinIndexed(g: *G, acc: *const Acc, n: u32, k: u32) !Indexed {
-            const joined = try g.concat(acc.outs[0..acc.n_outs], 0);
-            var order: [max_route_ids]u32 = undefined;
-            const n_ids = joinOrder(acc.pos[0..acc.n_pos], n * k, &order);
-            const ord = try g.hostArray(std.mem.sliceAsBytes(order[0..n_ids]), &.{@intCast(n_ids)}, .uint32);
-            return .{ .rows = joined, .order = ord };
-        }
-
         /// P1's construction self-check (`Wide.read_ahead`), once on the real stream before any request:
         /// layer 0's records read ahead equal their demand reads, bit for bit, over two pool jobs.
         /// Returns how many records were checked.
@@ -1052,41 +819,13 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             return self.source.checkReadAhead(0, expert_io.max_items + 1);
         }
 
-        /// The wide lane: the routing barrier; the call's distinct experts (first
-        /// appearance) routed in groups of at most `max_route_ids`; per group,
-        /// every part waited, then per bank the group's rows through the layer's
-        /// DIG-X route (slot = the row the source serves the expert in, act row =
-        /// its token), drained and evaluated before the group is released (the
-        /// next route may refill those slots); the outputs joined in the
-        /// router's order, `[n, k, hidden]` f32. The DIG kernels read bf16
-        /// activations (the lane of record's MoE input): another dtype is
-        /// rounded to bf16 once, here. `Options.wide.seed` seeds the layer from
-        /// the call and drains each group once; `.hot_first` orders the groups hottest first;
-        /// `Options.wide.depth` 2 routes group g + 1 (its reads) before group g's waves.
-        fn runWide(self: *Self, g: *G, layer: u32, xf: T, indices: T, n: u32, k: u32) !T {
-            try self.runWideCore(g, layer, xf, indices, n, k, false);
-            const a = self.a;
-            const w = &self.wide;
-            const n_ids = n * k;
-            // `take(concatenate(outputs), argsort(positions))`, the permutation made on the host.
-            const joined = try g.concat(w.kept.items, 0);
-            for (w.kept.items) |x| g.release(x);
-            w.kept.clearRetainingCapacity();
-            try w.inv.resize(a, n_ids);
-            invertPositions(w.pos.items, w.inv.items);
-            const ord = try g.hostArray(std.mem.sliceAsBytes(w.inv.items), &.{@intCast(n_ids)}, .uint32);
-            return g.reshape(try g.take(joined, ord, 0), &.{ @intCast(n), @intCast(k), self.hidden });
-        }
-
         /// JOINLESS: the wide call's outputs unjoined (above `max_parts`, the smallest merged into one source:
         /// `mergeJoinless`) and each assignment's (source, row) as int32 [n, k, 2]; the combine reads the
         /// rows in place. The sources stay kept until `releaseParts`.
-        pub const max_parts = joinless_sources;
         pub const Parts = struct { outs: []const T, loc: T };
 
         fn runWideParts(self: *Self, g: *G, layer: u32, xf: T, indices: T, n: u32, k: u32) !Parts {
-            // The math's unjoined prefill when it has one: the combine reads the waves' own outputs.
-            try self.runWideCore(g, layer, xf, indices, n, k, comptime @hasDecl(M, "has_parts") and M.has_parts);
+            try self.runWideCore(g, layer, xf, indices, n, k);
             const w = &self.wide;
             try w.loc.resize(self.a, 2 * n * k);
             if (comptime wide_profile.enabled) {
@@ -1104,8 +843,8 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             self.wide.kept.clearRetainingCapacity();
         }
 
-        /// A wide call's groups over its experts hottest first: the seed's ranks [0, sa) chunked apart from the stream's
-        /// (`Wide.seed_aligned`; sa 0: one run of `max_route_ids` chunks).
+        /// A wide call's groups over its experts hottest first: the staged misses' ranks [0, sa) chunked apart from the
+        /// call's others (`Wide.stage`; sa 0: one run of `max_route_ids` chunks).
         const Groups = struct {
             d: []const u16,
             sa: usize,
@@ -1126,54 +865,26 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             }
         };
 
-        /// The deferred base-bank rows gathered so far as one call's waves, drained; their slots stay held. `at_seed`:
-        /// P1b's call at the seed (the profile's split charges it apart from the end call's).
-        fn deferredBase(self: *Self, g: *G, layer: u32, act: T, comptime parts: bool, at_seed: bool) !void {
-            const a = self.a;
-            const w = &self.wide;
-            if (w.def_slot.items.len == 0) return;
-            wide_profile.setMode(if (at_seed) .base_seed else .base_end);
-            defer wide_profile.setMode(.stream);
-            const kb = w.kept.items.len;
-            const b = self.banks[layer][@backingInt(BankKind.base)].?;
-            const rows_: quant.PrefillRows = .{ .slot = w.def_slot.items, .act_row = w.def_act.items };
-            if (parts) {
-                w.wave_pos.clearRetainingCapacity();
-                try self.math.prefillParts(g, layer, act, rows_, b, a, &w.kept, &w.wave_pos);
-                for (w.wave_pos.items) |p| try w.pos.append(a, w.def_pos.items[p]);
-            } else {
-                try w.kept.ensureUnusedCapacity(a, 1);
-                w.kept.appendAssumeCapacity(try self.math.prefill(g, layer, act, rows_, b));
-                try w.pos.appendSlice(a, w.def_pos.items);
-            }
-            try self.math.finishPrefill(g);
-            const td = wide_profile.now();
-            try g.evalAll(w.kept.items[kb..]);
-            wide_profile.charge(.drain, td);
-            w.def_slot.clearRetainingCapacity();
-            w.def_act.clearRetainingCapacity();
-            w.def_pos.clearRetainingCapacity();
-        }
-
-        /// `Wide.route_cut`: the call's rows bucketed by group (`bucketRowsByGroup`) into `inv` [n_ids] (the join's scratch,
-        /// unused until the call's groups are done: no new per-row memory), group `gi`'s at `grp_off[gi]..grp_off[gi + 1]`.
-        /// A group's bank passes then read its own rows only. `counted`: `count` holds each expert's rows.
-        fn groupRows(a: std.mem.Allocator, w: *WideScratch, groups: Groups, n_groups: usize, counted: bool) !void {
+        /// The call's rows bucketed by group (`bucketRowsByGroup`) into `inv` [n_ids] (the join's scratch, unused until the
+        /// call's groups are done: no new per-row memory), group `gi`'s at `grp_off[gi]..grp_off[gi + 1]`. A group's bank
+        /// passes then read its own rows only.
+        fn groupRows(a: std.mem.Allocator, w: *WideScratch, groups: Groups, n_groups: usize) !void {
             try w.grp_of.resize(a, w.first.items.len);
             for (groups.d, 0..) |e, i| w.grp_of.items[e] = @intCast(groups.index(i));
             try w.grp_off.resize(a, n_groups + 1);
             try w.inv.resize(a, w.ids.items.len);
-            bucketRowsByGroup(w.ids.items, groups.d, w.grp_of.items, if (counted) w.count.items else null, w.grp_off.items, w.inv.items);
+            bucketRowsByGroup(w.ids.items, groups.d, w.grp_of.items, w.count.items, w.grp_off.items, w.inv.items);
         }
 
-        /// The construction's route (`Wide.route_cut`), once per call: the core at its comptime instance.
-        fn runWideCore(self: *Self, g: *G, layer: u32, xf: T, indices: T, n: u32, k: u32, comptime parts: bool) !void {
-            return switch (self.wide_route.route_cut) {
-                inline else => |cut| self.runWideCoreAt(g, layer, xf, indices, n, k, parts, cut),
-            };
-        }
-
-        fn runWideCoreAt(self: *Self, g: *G, layer: u32, xf: T, indices: T, n: u32, k: u32, comptime parts: bool, comptime cut: bool) !void {
+        /// The wide lane: the routing barrier; the call's residency seeded from its ids (the most routed experts protected
+        /// in the persistent rows); its distinct experts hottest first, routed in groups of at most `max_route_ids`, group
+        /// g + 1 (its reads) routed before group g's waves at `Options.wide.depth` 2; per group, every part waited, then per
+        /// bank the group's rows through the math's prompt route (slot = the row the source serves the expert in, act row
+        /// = its token), the group's banks queued back to back and drained once before the group is released (the next
+        /// route may refill those slots). The kernels read bf16 activations: another dtype is rounded to bf16 once, here.
+        /// Each wave's output stays kept, each wave-ordered row's routed position in `pos`.
+        fn runWideCore(self: *Self, g: *G, layer: u32, xf: T, indices: T, n: u32, k: u32) !void {
+            if (comptime !(@hasDecl(M, "has_parts") and M.has_parts)) @compileError(@typeName(M) ++ ": the wide lane runs the math's prefillParts");
             const a = self.a;
             const w = &self.wide;
             wide_profile.countWideCall();
@@ -1181,11 +892,7 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             // The wide lane takes prefill-width calls only (the prefill texts bind small inputs as
             // `constant`; a decode-width call is the decode lane's).
             if (comptime !@hasDecl(M, "prefill_min_tokens")) std.debug.assert(n_ids >= wide_min_ids);
-            const feed = self.wide_route.seed;
-            const hot_first = self.wide_route.hot_first;
             const depth: usize = self.wide_route.depth;
-            const cold: u32 = self.wide_route.cold_rows;
-            const cold_chunk: usize = if (@hasDecl(M, "max_decode_rows")) M.max_decode_rows else max_route_ids;
             // turboexl3_glm53f: `Wide.stage`: the layer's misses routed before the barrier into the transient windows, the
             // residents held meanwhile (the routes' misses take transient rows, or an empty row); their reads run while
             // the barrier's evaluation runs the layer's attention. The calls are handed to `calls` below.
@@ -1214,83 +921,52 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             try w.first.resize(a, self.n_experts);
             @memset(w.first.items, -1);
             w.distinct.clearRetainingCapacity();
-            const counted = feed or hot_first or cold > 0;
-            if (comptime cut) {
-                // The call's experts in first appearance and (the feed's order, the cold split) their rows: one pass.
-                try w.distinct.ensureTotalCapacity(a, self.n_experts);
-                if (counted) {
-                    try w.count.resize(a, self.n_experts);
-                    @memset(w.count.items, 0);
-                    for (w.ids.items) |e| {
-                        if (w.first.items[e] < 0) {
-                            w.first.items[e] = @intCast(w.distinct.items.len);
-                            w.distinct.appendAssumeCapacity(e);
-                        }
-                        w.count.items[e] += 1;
-                    }
-                } else for (w.ids.items) |e| if (w.first.items[e] < 0) {
+            // The call's experts in first appearance and (the feed's order) their rows: one pass.
+            try w.distinct.ensureTotalCapacity(a, self.n_experts);
+            try w.count.resize(a, self.n_experts);
+            @memset(w.count.items, 0);
+            for (w.ids.items) |e| {
+                if (w.first.items[e] < 0) {
                     w.first.items[e] = @intCast(w.distinct.items.len);
                     w.distinct.appendAssumeCapacity(e);
-                };
-            } else {
-                for (w.ids.items) |e| if (w.first.items[e] < 0) {
-                    w.first.items[e] = @intCast(w.distinct.items.len);
-                    try w.distinct.append(a, e);
-                };
-                if (counted) {
-                    try w.count.resize(a, self.n_experts);
-                    @memset(w.count.items, 0);
-                    for (w.ids.items) |e| w.count.items[e] += 1;
                 }
+                w.count.items[e] += 1;
             }
-            // The call's residency seed (the seed route), then its experts hottest first (the order route).
-            if (feed) {
-                // P1: the layer's read-ahead lands before its seed (which protects the ones it chooses).
-                if (comptime @hasDecl(S, "awaitReadAhead")) if (self.wide_route.read_ahead) try self.source.awaitReadAhead(layer);
-                if (comptime @hasDecl(S, "seedPrefill")) try self.source.seedPrefill(layer, w.ids.items) else unreachable;
-            }
-            if (hot_first) {
-                if (staged_n > 0) {
-                    // turboexl3_glm53f: `Wide.stage`: the staged experts first, in their routes' order (any the call does not
-                    // route among them, with no rows), then the call's other experts hottest first (the stock count order).
-                    // Not the source's own order: its P7 plans take a call's groups at its first route, and the staged
-                    // routes are live before this call's order is known.
-                    const staged = w.staged.items[0..staged_n];
-                    for (staged) |e| w.first.items[e] = -2;
-                    var r: usize = 0;
-                    for (w.distinct.items) |e| if (w.first.items[e] != -2) {
-                        w.distinct.items[r] = e;
-                        r += 1;
-                    };
-                    std.sort.pdq(u16, w.distinct.items[0..r], @as([]const u32, w.count.items), struct {
-                        fn lt(c: []const u32, x: u16, y: u16) bool {
-                            return if (c[x] != c[y]) c[x] > c[y] else x < y;
-                        }
-                    }.lt);
-                    try w.distinct.resize(a, staged_n + r);
-                    std.mem.copyBackwards(u16, w.distinct.items[staged_n..][0..r], w.distinct.items[0..r]);
-                    @memcpy(w.distinct.items[0..staged_n], staged);
-                } else if (comptime @hasDecl(S, "hotOrder")) self.source.hotOrder(layer, w.distinct.items, w.count.items) else std.sort.pdq(u16, w.distinct.items, @as([]const u32, w.count.items), struct {
+            // The call's residency seed, then its experts hottest first.
+            // P1: the layer's read-ahead lands before its seed (which protects the ones it chooses).
+            if (comptime @hasDecl(S, "awaitReadAhead")) if (self.wide_route.read_ahead) try self.source.awaitReadAhead(layer);
+            try self.source.seedPrefill(layer, w.ids.items);
+            if (staged_n > 0) {
+                // turboexl3_glm53f: `Wide.stage`: the staged experts first, in their routes' order (any the call does not
+                // route among them, with no rows), then the call's other experts hottest first (the stock count order).
+                // Not the source's own order: its P7 plans take a call's groups at its first route, and the staged
+                // routes are live before this call's order is known.
+                const staged = w.staged.items[0..staged_n];
+                for (staged) |e| w.first.items[e] = -2;
+                var r: usize = 0;
+                for (w.distinct.items) |e| if (w.first.items[e] != -2) {
+                    w.distinct.items[r] = e;
+                    r += 1;
+                };
+                std.sort.pdq(u16, w.distinct.items[0..r], @as([]const u32, w.count.items), struct {
+                    fn lt(c: []const u32, x: u16, y: u16) bool {
+                        return if (c[x] != c[y]) c[x] > c[y] else x < y;
+                    }
                 }.lt);
-                for (w.distinct.items, 0..) |e, i| w.first.items[e] = @intCast(i);
-            }
+                try w.distinct.resize(a, staged_n + r);
+                std.mem.copyBackwards(u16, w.distinct.items[staged_n..][0..r], w.distinct.items[0..r]);
+                @memcpy(w.distinct.items[0..staged_n], staged);
+            } else self.source.hotOrder(layer, w.distinct.items, w.count.items);
+            for (w.distinct.items, 0..) |e, i| w.first.items[e] = @intCast(i);
             const act = if (g.dtypeOf(xf) == .bfloat16) xf else try g.astype(xf, .bfloat16);
             w.pos.clearRetainingCapacity();
             w.kept.clearRetainingCapacity();
-            const defer_base = self.wide_route.defer_base;
-            w.def_slot.clearRetainingCapacity();
-            w.def_act.clearRetainingCapacity();
-            w.def_pos.clearRetainingCapacity();
             const n_distinct = w.distinct.items.len;
-            // Seed-aligned: the seed's ranks [0, sa) in groups of their own, the stream's after them (sa 0: one run).
-            const aligned = self.wide_route.seed_aligned;
-            const sa: usize = if (staged_n > 0) staged_n else if (comptime @hasDecl(S, "seedRanks")) (if (aligned) @min(self.source.seedRanks(layer), n_distinct) else 0) else 0;
+            // `Wide.stage`: the staged ranks [0, sa) in groups of their own, the call's others after them (sa 0: one run).
+            const sa: usize = staged_n;
             const groups: Groups = .{ .d = w.distinct.items, .sa = sa, .seed_groups = (sa + max_route_ids - 1) / max_route_ids };
             const n_groups = groups.seed_groups + (n_distinct - sa + max_route_ids - 1) / max_route_ids;
-            if (comptime cut) try groupRows(a, w, groups, n_groups, counted);
-            // P1b: the seed's base call is due after its last group (aligned: the last seed group; else the first group
-            // with a transient row).
-            var base_due = self.wide_route.base_at_seed;
+            try groupRows(a, w, groups, n_groups);
             // The live groups' calls, by group index mod `depth` (read ahead up to `depth` groups).
             var calls: [expert_stream.max_wide_depth]?*S.Call = @splat(null);
             errdefer {
@@ -1300,7 +976,6 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
                 };
                 for (w.kept.items) |x| g.release(x);
                 w.kept.clearRetainingCapacity();
-                if (comptime @hasDecl(S, "holdBase")) if (defer_base) self.source.releaseHeld();
             }
             // `Wide.stage`: the staged routes are groups 0 .. (their errdefer's calls handed over)
             for (&staged_calls, 0..) |*c, i| if (c.*) |cl| {
@@ -1314,7 +989,7 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             wide_profile.charge(.route, tp);
             // turboexl3_glm53f: `Wide.drain_lag` (TURBOEXL3_GLM53F_PF_DRAIN_LAG): the pending group's drain, its call's
             // release and the route `depth` groups on, run at the next group's first commit (the math's `LagPending`)
-            const lag = feed and self.wide_route.drain_lag;
+            const lag = self.wide_route.drain_lag;
             const LagCtx = struct {
                 ex: *Self,
                 g: *G,
@@ -1349,7 +1024,6 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
             defer if (lag) pending.disarm();
             for (0..n_groups) |gi| {
                 const start = groups.start(gi);
-                const group = groups.of(gi);
                 const call = calls[gi % depth].?;
                 const sv = self.source.served(call);
                 tp = wide_profile.now();
@@ -1369,44 +1043,22 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
                 const k0 = w.kept.items.len;
                 // turboexl3_glm53f: `Wide.drain_lag`: the pending group's drain armed for this group's first commit
                 if (lag) pending.begin();
-                var streamed = false;
                 for ([_]BankKind{ .base, .ext, .transient }) |kind| {
-                    const kb = w.kept.items.len;
                     w.slot.clearRetainingCapacity();
                     w.act_row.clearRetainingCapacity();
-                    w.cold_slot.clearRetainingCapacity();
-                    w.cold_act.clearRetainingCapacity();
-                    w.cold_pos.clearRetainingCapacity();
-                    // The cut: the group's own rows, in row order (`groupRows`), each bank's rows as a pass over the whole
-                    // call meets them; the control: every row of the call, the group's kept.
-                    const passed: []const u32 = if (comptime cut) w.inv.items[w.grp_off.items[gi]..w.grp_off.items[gi + 1]] else &.{};
-                    const n_pass = if (comptime cut) passed.len else w.ids.items.len;
-                    for (0..n_pass) |pi| {
-                        const row: usize = if (comptime cut) passed[pi] else pi;
+                    // The group's own rows, in row order (`groupRows`), each bank's rows as a pass over the whole call
+                    // meets them.
+                    for (w.inv.items[w.grp_off.items[gi]..w.grp_off.items[gi + 1]]) |row| {
                         const e = w.ids.items[row];
                         const fi: usize = @intCast(w.first.items[e]);
-                        if (comptime !cut) if (fi < start or fi >= start + group.len) continue;
                         const ref = sv.refs[fi - start];
                         if (ref.bank != kind) continue;
                         const act_row: u32 = @intCast(row / @as(usize, k));
-                        if (defer_base and kind == .base) {
-                            try w.def_slot.append(a, ref.row);
-                            try w.def_act.append(a, act_row);
-                            try w.def_pos.append(a, @intCast(row));
-                            continue;
-                        }
-                        if (cold > 0 and w.count.items[e] <= cold) {
-                            try w.cold_slot.append(a, ref.row);
-                            try w.cold_act.append(a, act_row);
-                            try w.cold_pos.append(a, @intCast(row));
-                            continue;
-                        }
                         try w.slot.append(a, ref.row);
                         try w.act_row.append(a, act_row);
-                        if (parts) try w.call_pos.append(a, @intCast(row)) else try w.pos.append(a, @intCast(row));
+                        try w.call_pos.append(a, @intCast(row));
                     }
-                    if (w.slot.items.len == 0 and w.cold_slot.items.len == 0) continue;
-                    streamed = streamed or kind == .transient;
+                    if (w.slot.items.len == 0) continue;
                     var b = self.banks[layer][@backingInt(kind)].?;
                     if (comptime wide_event_gates) if (ready) |value| {
                         b = .{
@@ -1415,77 +1067,33 @@ pub fn ExpertsWith(comptime G: type, comptime S: type, comptime M: type, comptim
                             .down = try self.waitProj(g, b.down, value, &.{}),
                         };
                     };
-                    const hot = w.slot.items.len > 0;
-                    if (hot) {
-                        if (parts) {
-                            // The waves' outputs as they are; each wave-ordered row's routed position.
-                            w.wave_pos.clearRetainingCapacity();
-                            try self.math.prefillParts(g, layer, act, .{ .slot = w.slot.items, .act_row = w.act_row.items }, b, a, &w.kept, &w.wave_pos);
-                            for (w.wave_pos.items) |p| try w.pos.append(a, w.call_pos.items[p]);
-                            w.call_pos.clearRetainingCapacity();
-                        } else {
-                            try w.kept.ensureUnusedCapacity(a, 1);
-                            const y = try self.math.prefill(g, layer, act, .{ .slot = w.slot.items, .act_row = w.act_row.items }, b);
-                            w.kept.appendAssumeCapacity(y);
-                        }
-                    }
-                    // Cold rows: the decode GEMV over their slots, encoded after the bank's wide waves
-                    // (the act-row index is built right before its take).
-                    var c0: usize = 0;
-                    while (c0 < w.cold_slot.items.len) : (c0 += cold_chunk) {
-                        const c1 = @min(c0 + cold_chunk, w.cold_slot.items.len);
-                        const m: c_int = @intCast(c1 - c0);
-                        const ar = try g.hostArray(std.mem.sliceAsBytes(w.cold_act.items[c0..c1]), &.{m}, .uint32);
-                        const xs = try g.take(act, ar, 0);
-                        const sid = try g.hostArray(std.mem.sliceAsBytes(w.cold_slot.items[c0..c1]), &.{m}, .uint32);
-                        const h = try self.math.gateUp(g, xs, sid, b.gate, b.up);
-                        try w.kept.ensureUnusedCapacity(a, 1);
-                        w.kept.appendAssumeCapacity(g.keep(try self.math.down(g, h, sid, b.down)));
-                        try w.pos.appendSlice(a, w.cold_pos.items[c0..c1]);
-                    }
-                    if (!feed) {
-                        if (hot) try self.math.finishPrefill(g);
-                        tp = wide_profile.now();
-                        try g.evalAll(w.kept.items[kb..]);
-                        wide_profile.charge(.drain, tp);
-                    }
+                    // The waves' outputs as they are; each wave-ordered row's routed position.
+                    w.wave_pos.clearRetainingCapacity();
+                    try self.math.prefillParts(g, layer, act, .{ .slot = w.slot.items, .act_row = w.act_row.items }, b, a, &w.kept, &w.wave_pos);
+                    for (w.wave_pos.items) |p| try w.pos.append(a, w.call_pos.items[p]);
+                    w.call_pos.clearRetainingCapacity();
                 }
-                // Feed: the group's banks queued back to back, one drain before its slots go back.
-                if (feed) {
-                    try self.math.finishPrefill(g);
-                    if (lag) {
-                        // turboexl3_glm53f: `Wide.drain_lag`: the pending group's drain and release if this group
-                        // committed nothing, then this group pending (its drain at the next group's first commit)
-                        try pending.end(gi, k0, w.kept.items.len);
-                    } else {
-                        tp = wide_profile.now();
-                        try g.evalAll(w.kept.items[k0..]);
-                        wide_profile.charge(.drain, tp);
-                    }
+                // The group's banks queued back to back, one drain before its slots go back.
+                try self.math.finishPrefill(g);
+                if (lag) {
+                    // turboexl3_glm53f: `Wide.drain_lag`: the pending group's drain and release if this group
+                    // committed nothing, then this group pending (its drain at the next group's first commit)
+                    try pending.end(gi, k0, w.kept.items.len);
+                } else {
+                    tp = wide_profile.now();
+                    try g.evalAll(w.kept.items[k0..]);
+                    wide_profile.charge(.drain, tp);
                 }
                 if (!lag) {
                     tp = wide_profile.now();
-                    // The group's base-bank slots stay pinned and held for the deferred call past its release.
-                    if (comptime @hasDecl(S, "holdBase")) if (defer_base) try self.source.holdBase(call);
                     self.source.release(call);
                     calls[gi % depth] = null;
                     if (gi + depth < n_groups) calls[gi % depth] = try self.source.route(layer, groups.of(gi + depth), &.{});
                     wide_profile.charge(.route, tp);
                 }
-                // P1b: the seed has landed (its groups read, the next routes' reads posted): its base call drains now.
-                if (base_due and (if (aligned) gi + 1 == groups.seed_groups else streamed)) {
-                    base_due = false;
-                    try self.deferredBase(g, layer, act, parts, true);
-                }
             }
             // turboexl3_glm53f: `Wide.drain_lag`: the call's last group drained and released
             if (lag) try pending.flush();
-            // The deferred base-bank rows: one call's waves over every group's (with P1b, the later ones'), then the
-            // slots let go.
-            if (comptime @hasDecl(S, "holdBase")) if (defer_base) {
-                try self.deferredBase(g, layer, act, parts, false);
-                self.source.releaseHeld();
-            };
         }
     };
 }

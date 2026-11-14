@@ -11,8 +11,9 @@ src/streamed/ and src/exl3/ are mlx-serve's GLM-5.3-Flash EXL3 bank and its sche
 src/sdk/weights/streamed/ and src/sdk/quant/exl3/stream/: the bank source, the GLM bank, MiMo's stream bridge, the
 routed experts' scheduler, the stream's own SDK and the EXL3 stream quant). They moved out of mlx-serve at bc6c5f2c,
 and mlx-serve no longer carries them, so this plugin maintains them. Their imports point at this plugin's files and
-the kit. This plugin removed the functions, declarations and tests that it never reaches, and the DeepSeek-V4.1
-kernel texts and test fixtures. The stream itself and its read pool are the kit's (`kit.streamed`), not copies.
+the kit. This plugin removed the functions, declarations, routes and tests that it never reaches, MiMo's bank, and
+the DeepSeek-V4.1 kernel texts and test fixtures. The stream itself and its read pool are the kit's (`kit.streamed`),
+not copies.
 
 src/host_shims.zig replaces mlx-serve's sdk/weights/streamed/csrc/mlx_event_shim.cpp, mlx_alloc_shim.cpp,
 mlx_launch_cache.inc, mimo_gpu_address.inc and q3_event_shim.mm: it gives their C symbols over the server's host

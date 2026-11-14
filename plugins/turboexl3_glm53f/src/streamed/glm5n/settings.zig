@@ -16,7 +16,6 @@ pub const default_tally_ratio: f64 = 0;
 pub const reader_staging_bytes: u64 = 16 << 20;
 
 pub const DecodeMoe = enum { stock, fused, hitpass };
-pub const DecodePredict = enum { f32, bf16 };
 pub const PromptResidents = expert_usage.PromptResidents;
 
 pub const Exl3GateUpForm = enum { seam, guone };

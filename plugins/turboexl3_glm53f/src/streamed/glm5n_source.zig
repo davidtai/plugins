@@ -166,9 +166,8 @@ pub const Source = struct {
         // turboexl3_glm53f: the keep-warm queue only with TURBOEXL3_GLM53F_KEEP_WARM (its Metal shim this plugin's own,
         // src/csrc/glm53f_gpu_warm.m: the server's csrc/mimo_gpu_warm.inc is not in the host table).
         const warm: gpu_warm.Route = if (keep_warm) .waits else .off;
-        const inner = try experts.Exl3Source.init(a, io, dir, prompt_rows, decode_rows, gates, s, .hitpass, .bf16, warm, .{ .ratio = settings.default_tally_ratio }, .{}, prompt_levers.Settings{}, .direct, .keep);
+        const inner = try experts.Exl3Source.init(a, io, dir, prompt_rows, decode_rows, gates, s, warm, .{ .ratio = settings.default_tally_ratio }, .{}, prompt_levers.Settings{}, .direct, .keep);
         errdefer inner.deinit();
-        try inner.ex.bindMergeGateWaits();
         _ = try inner.prebuildExperts();
         // turboexl3_glm53f: the seed's profile file (`seedDecision`, `TURBOEXL3_GLM53F_SEED_DECODE`).
         var d = try seedDecision(a, io, dir, n_moe, n_experts);
