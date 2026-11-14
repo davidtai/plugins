@@ -13,8 +13,7 @@
 //! `2` (one scale a row on the routed experts) is refused by name: that scheme holds a row of hidden in one threadgroup,
 //! at most 32 blocks of 128, and DeepSeek-V4.1's hidden 5120 is 40. Decode and verify rows stay exact. turboexl3's
 //! src/models/deepseek_v41/deepseek_int8_test.zig holds each path to the exact one at these shapes (n 40 and n 32 routed).
-//! Quality is not measured on DeepSeek-V4.1: GLM-5.3-Flash's measurements of the same int8 math carry the evidence
-//! (turboexl3_glm53f). MLX-free.
+//! MLX-free.
 
 const std = @import("std");
 
