@@ -33,7 +33,6 @@
 const std = @import("std");
 const mlx = @import("sdk").mlx;
 const pk = @import("sdk");
-const kernel_reg = @import("kernels.zig");
 
 const Dtype = mlx.mlx_dtype;
 
@@ -65,14 +64,6 @@ pub const Spec = struct {
     act: Activation,
     /// the MoE input's dtype
     input: Dtype,
-};
-
-/// What the load context hands a quant's accept: the kernel set it owns (a quant with pinned
-/// texts takes it back as its own registry's set and self-checks its subset there) and the
-/// claimed group's description.
-pub const Context = struct {
-    kernels: ?kernel_reg.SetRef = null,
-    peek: ?*const BankPeek = null,
 };
 
 /// One prefill call's routed rows: `slot[i]` is routed row i's bank slot; row i reads x row i,

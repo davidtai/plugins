@@ -6,7 +6,6 @@
 
 const std = @import("std");
 const env = @import("mlx_host").env;
-const kset = @import("../sdk_ext/kernel_set.zig");
 const io_util = @import("sdk").io_util;
 const expert_io = @import("../sdk_ext.zig").expert.io;
 const bank_file = @import("bank_file.zig");

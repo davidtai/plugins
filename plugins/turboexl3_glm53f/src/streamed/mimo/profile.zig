@@ -2,7 +2,10 @@
 const std = @import("std");
 const sdk = @import("sdk");
 pub const enabled = sdk.plugin_profile;
-pub const Bucket = @import("../sdk_ext.zig").profile.PrefillBucket;
+/// Where the prompt pass's routed call spends its host time: the routing barrier (the ids to the host), the source's
+/// route (reads issued), the read waits, the waves' encode (graphs, host tables, submission), the drains (the host
+/// blocked on GPU compute), the join (the outputs' concatenate / take).
+pub const Bucket = enum { barrier, route, read_wait, encode, drain, join };
 pub const Stamp = if (enabled) u64 else void;
 const n = @typeInfo(Bucket).@"enum".field_names.len;
 var ns: [n]u64 = @splat(0);

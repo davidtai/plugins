@@ -1,5 +1,5 @@
-//! What the registry routes on: a plugin's claim and the descriptions it claims from (docs/plugins.md: one
-//! question per hook, asked in registry order). Pure host: nothing here reads a weight or touches MLX.
+//! A quant's claim and the weight group's description it claims from. Pure host: nothing here reads a weight or
+//! touches MLX.
 
 const std = @import("std");
 
@@ -26,27 +26,6 @@ pub const Diag = struct {
     }
 };
 
-/// A model as discovery sees it before any weight loads: its directory and config.json, built once per model by
-/// the host. The `arch`, `source`, `engine` and `expert_source` kinds claim from it.
-pub const ConfigPeek = struct {
-    model_dir: []const u8,
-    /// config.json as read: an arch's own parse reads the whole document.
-    text: []const u8,
-    /// config.json's top-level object.
-    root: std.json.ObjectMap,
-
-    /// Parses `text` (kept by reference) into `arena`.
-    pub fn parse(arena: std.mem.Allocator, model_dir: []const u8, text: []const u8) error{ ConfigNotJson, ConfigNotObject, OutOfMemory }!ConfigPeek {
-        const v = std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{}) catch |e| return switch (e) {
-            error.OutOfMemory => error.OutOfMemory,
-            else => error.ConfigNotJson,
-        };
-        if (v != .object) return error.ConfigNotObject;
-        return .{ .model_dir = model_dir, .text = text, .root = v.object };
-    }
-
-};
-
 /// One per-expert tensor of a weight group, as the group's description names it.
 pub const Segment = struct { name: []const u8, dtype: []const u8, shape: []const u64 };
 
@@ -65,5 +44,3 @@ pub const GroupPeek = struct {
     n_layers: u64,
     layers: []const LayerPeek,
 };
-
-const testing = std.testing;

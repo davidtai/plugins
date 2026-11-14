@@ -38,5 +38,3 @@ pub fn copyStrided(comptime S: type, comptime D: type, src: [*]const S, shape: [
         }
     }
 }
-
-const testing = std.testing;

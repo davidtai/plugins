@@ -25,12 +25,3 @@ pub fn mlx_fast_metal_kernel_free(k: mlx.mlx_fast_metal_kernel) void {
 pub fn mlx_fast_metal_kernel_apply(outputs: *mlx.mlx_vector_array, k: mlx.mlx_fast_metal_kernel, inputs: mlx.mlx_vector_array, config: mlx.mlx_fast_metal_kernel_config, stream: mlx.mlx_stream) c_int {
     return mlxlc_apply(outputs, k, inputs, config, stream);
 }
-
-// ---- CPU tests (no device: graphs are built on an explicit GPU stream and never evaluated) ----
-
-const std = @import("std");
-const testing = std.testing;
-
-extern "c" fn mlxlc_test_config(config: mlx.mlx_fast_metal_kernel_config, out: *[9]c_int) void;
-extern "c" fn mlxlc_test_bench(k: mlx.mlx_fast_metal_kernel, config: mlx.mlx_fast_metal_kernel_config, n_in: c_int, ndims: [*]const c_int, shapes: [*]const c_int, dtypes: [*]const mlx.mlx_dtype, iters: c_int, out: *[3]i64) c_int;
-extern "c" fn dsv41_alloc_last_error() [*:0]const u8;

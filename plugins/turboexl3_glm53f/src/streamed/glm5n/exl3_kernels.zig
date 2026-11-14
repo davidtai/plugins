@@ -23,7 +23,6 @@ const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
 const mtl = @import("../sdk_ext/metal_launch.zig");
-const kset = @import("../sdk_ext/kernel_set.zig");
 const quant = @import("../sdk_ext.zig").quant;
 const xq = @import("../../exl3/quant.zig");
 const ops = @import("../ops.zig");

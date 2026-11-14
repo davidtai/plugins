@@ -17,7 +17,6 @@ const std = @import("std");
 const sdk = @import("sdk");
 const mlx = sdk.mlx;
 const mtl = @import("../sdk_ext/metal_launch.zig");
-const kset = @import("../sdk_ext/kernel_set.zig");
 const xk = @import("exl3_kernels.zig");
 
 pub const G = xk.G;
