@@ -670,9 +670,8 @@ pub fn Math(comptime G: type, comptime Proj: type, comptime Bank: type, comptime
         /// the fused paths' switches (the file's doc), read at construction
         sw: Switches = .{},
 
-        /// Construction: the stock math's signature (its texts are not installed: nothing here runs them).
-        const init_params = @typeInfo(@TypeOf(Stock.init)).@"fn".param_types;
-        pub fn init(a: std.mem.Allocator, s: mlx.mlx_stream, call_rows: u32, forms: init_params[3].?, wave_rows: u32, pack: init_params[5].?, diag: init_params[6].?) !Self {
+        /// Construction: the stock math's argument types (nothing here runs its texts).
+        pub fn init(a: std.mem.Allocator, s: mlx.mlx_stream, call_rows: u32, forms: Stock.Forms, wave_rows: u32, pack: Stock.PackOf, diag: *Stock.Diag) !Self {
             _ = .{ s, call_rows, forms, wave_rows, pack, diag };
             const sw = Switches.read(&processEnv) catch |e| {
                 log.err("[turboexl3_glm53f] {s}: TURBOEXL3_GLM53F_PF_ROWS, TURBOEXL3_GLM53F_DEC_BF16, TURBOEXL3_GLM53F_PF_FEED and TURBOEXL3_GLM53F_PF_ALIGN take 0 or 1 (unset: 1): the load is refused\n", .{@errorName(e)});
